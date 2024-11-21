@@ -3,8 +3,8 @@ import torch
 from TemporalTransformer.data.dataloader import MotionLoader
 
 # Parameters for testing
-amass_datasets = ['HumanEva']  # Replace with your dataset names
-amass_dir = 'dataset/AMASS'
+amass_datasets = ['HumanEva', 'ACCAD', 'CMU','DanceDB', 'Eyes_Japan_Dataset', 'GRAB', 'HUMAN4D', 'KIT']
+amass_dir = '../../../data/edwarde/dataset/AMASS'
 smplx_model_path = 'body_utils/body_models'
 clip_seconds = 2
 clip_fps = 30

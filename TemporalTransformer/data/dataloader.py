@@ -183,12 +183,9 @@ class MotionLoader(data.Dataset):
                 elif self.data_dict_list[i]['gender'] == 'female':
                     smplx_output = smplx_model_female(return_verts=True, **body_param_)  # generated human body mesh
                 joints = smplx_output.joints  # [T, 127, 3]
-                print(f"Joints shape: {joints.shape}")  # Expected: [T, 127, 3]
-
 
                 if self.mode in ['global_markers', 'local_markers', 'local_markers_3dv', 'local_markers_3dv_4chan']:
                     markers = smplx_output.vertices[:, self.markers_ids, :]
-                    print(f"Markers shape: {markers.shape}")  # Depends on the number of markers selected
 
                 if global_rot_norm:
                     ##### transfrom to pelvis at origin, face y axis
@@ -207,8 +204,6 @@ class MotionLoader(data.Dataset):
                         markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3]
 
 
-                print(f"Joints after global rotation normalization: {joints.shape}")
-                print(f"Markers after global rotation normalization: {markers.shape}")
 
 
 
@@ -288,7 +283,6 @@ class MotionLoader(data.Dataset):
                 if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan',
                                  'local_markers_3dv', 'local_markers_3dv_4chan']:
                     cur_body = cur_body.detach().cpu().numpy()  # numpy, [T, 25 or 68, 3], in (x,y,z)
-                    print(f"Body markers + Pelvis shape: {cur_body.shape}")  # Expected: [T, N_markers + 1, 3]
 
                     cur_body[:, :, [1, 2]] = cur_body[:, :, [2, 1]] # swap y/z axis  --> in (x,z,y)
 
@@ -337,7 +331,6 @@ class MotionLoader(data.Dataset):
                         # global vel (3) + local pose (25*3) + contact label (4)
                         global_vel = np.concatenate([velocity[:, :, 0], velocity[:, :, 2], rvelocity], axis=-1)
                         cur_body = np.concatenate([global_vel, cur_body, contact_lbls[0:-1]], axis=-1)  # [T-1, d=3+75(204)+4]
-                        print(f"Flattened feature shape: {cur_body.shape}")  # Expected: [T-1, D] where D = Total Features
 
 
 
