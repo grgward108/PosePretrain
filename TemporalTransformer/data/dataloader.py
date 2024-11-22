@@ -26,7 +26,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class MotionLoader(data.Dataset):
-    def __init__(self, clip_seconds=8, clip_fps=30, normalize=False, split='train', markers_type=None, mode=None, is_debug=False, log_dir=''):
+    def __init__(self, clip_seconds=8, clip_fps=30, normalize=False, split='train', markers_type=None, mode=None, is_debug=False, log_dir='', mask_percentage= 0.2):
         """
         markers_type = ['f0_p0, f15_p0, f0_p5, f15_p5, f0_p22, f15_p22']
 
@@ -48,6 +48,7 @@ class MotionLoader(data.Dataset):
         self.is_debug = is_debug
         self.markers_type = markers_type
         self.log_dir = log_dir
+        self.mask_percentage = mask_percentage
 
         assert self.markers_type is not None
 
@@ -77,15 +78,20 @@ class MotionLoader(data.Dataset):
 
 
     def divide_clip(self, dataset_name='HumanEva', amass_dir=None):
-        npz_fnames = sorted(glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz')))  # name list of all npz sequence files in current dataset
+        npz_fnames = sorted(
+            glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz'))
+        )
+
         fps_list = []
         # print('sequence #: ', len(npz_fnames))
         cnt_sub_clip = 0
         # print('reading sequences in %s...' % (dataset_name))
         for npz_fname in npz_fnames:
-            cdata = np.load(npz_fname)
 
-            fps = int(cdata['mocap_framerate'])  # check fps of current sequence
+            cdata = np.load(npz_fname, allow_pickle=True)
+
+            fps_key = 'mocap_framerate' if 'mocap_framerate' in cdata else 'mocap_frame_rate'
+            fps = int(cdata[fps_key])  # Check FPS of the current sequence
             fps_list.append(fps)
             if fps == 150:
                 sample_rate = 5
@@ -103,10 +109,9 @@ class MotionLoader(data.Dataset):
                 num_valid_clip = int(N/clip_len)
                 seq_trans = cdata['trans']
                 seq_poses = cdata['poses']
-                seq_dmpls = cdata['dmpls']
                 seq_betas = cdata['betas']
                 seq_gender = str(cdata['gender'])
-                seq_fps = int(cdata['mocap_framerate'])
+                seq_fps = int(cdata[fps_key])
 
                 for i in range(num_valid_clip):
                     # pose: 156-d (3 global rotation + 63 body pose + 45 left hand pose + 45 right hand pose)
@@ -130,6 +135,7 @@ class MotionLoader(data.Dataset):
     def read_data(self, amass_datasets, amass_dir):
         for dataset_name in tqdm(amass_datasets):
             self.divide_clip(dataset_name, amass_dir)
+
         self.n_samples = len(self.data_dict_list)
         print('[INFO] get {} sub clips in total.'.format(self.n_samples))
 
@@ -420,13 +426,35 @@ class MotionLoader(data.Dataset):
 
 
     def __getitem__(self, index):
+        """
+        Returns:
+            - masked_clip: Tensor with randomly masked markers (masking token replaces masked values).
+            - mask: Binary mask indicating which markers are masked (1 for masked, 0 for unmasked).
+            - original_clip: The unmodified clip for comparison (optional, useful for supervision).
+        """
         if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
             clip_img = self.clip_img_list[index]  # [T, d] d dims of body representation
             clip_img = torch.from_numpy(clip_img).float().permute(1, 0).unsqueeze(0)  # [1, d, T]
         elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
             clip_img = self.clip_img_list[index]  # [4, T, d]
             clip_img = torch.from_numpy(clip_img).float().permute(0, 2, 1)  # [4, d, T]
-        return [clip_img]
+
+        # Create a binary mask
+        T, J, C = clip_img.shape[-3:]  # Assuming shape is [B, d, T] or [B, 4, d, T]
+        mask = torch.zeros(T, J, dtype=torch.bool)  # Mask shape [T, J]
+        
+        # Randomly mask a percentage of the markers
+        num_masked = int(self.mask_percentage * T * J)
+        masked_indices = torch.randperm(T * J)[:num_masked]
+        mask.view(-1)[masked_indices] = 1  # Apply masking to the selected indices
+
+        # Apply masking token (set masked values to a constant, e.g., zero)
+        masked_clip = clip_img.clone()
+        masked_clip[..., mask] = 0.0  # Mask token value (can be adjusted)
+
+        # Return masked clip, mask, and optionally the original clip
+        return masked_clip, mask, clip_img
+
 
 
 

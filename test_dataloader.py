@@ -8,7 +8,7 @@ amass_dir = '../../../data/edwarde/dataset/AMASS'
 smplx_model_path = 'body_utils/body_models'
 clip_seconds = 2
 clip_fps = 30
-markers_type = 'f15_p22'  # Example markers type
+markers_type = 'f15_p5'  # Example markers type
 mode = 'local_markers_3dv'  # Choose mode to test
 
 # Initialize the MotionLoader
