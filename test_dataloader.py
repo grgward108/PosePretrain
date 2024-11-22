@@ -3,13 +3,13 @@ import torch
 from TemporalTransformer.data.dataloader import MotionLoader
 
 # Parameters for testing
-amass_datasets = ['HumanEva', 'ACCAD', 'CMU','DanceDB', 'Eyes_Japan_Dataset', 'GRAB', 'HUMAN4D', 'KIT']
+amass_datasets = ['HumanEva']
 amass_dir = '../../../data/edwarde/dataset/AMASS'
 smplx_model_path = 'body_utils/body_models'
 clip_seconds = 2
 clip_fps = 30
-markers_type = 'f15_p5'  # Example markers type
-mode = 'local_markers_3dv'  # Choose mode to test
+markers_type = 'f15_p22'  # Example markers type
+mode = 'local_joints_3dv'  # Choose mode to test
 
 # Initialize the MotionLoader
 print("[INFO] Initializing MotionLoader...")
@@ -32,6 +32,7 @@ dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
 
 # Print dataset size
 print(f"[INFO] Total clips in dataset: {len(dataset)}")
+
 
 # Create a DataLoader
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
