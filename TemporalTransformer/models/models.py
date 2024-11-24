@@ -70,21 +70,25 @@ class TemporalTransformerBlock(nn.Module):
         self.temporal_mlp = MLPBlock(dim_feat, mlp_ratio, drop_rate)
 
     def forward(self, x, seq_len):
-        # Apply spatial attention and MLP
+        # Spatial attention and MLP
         x = self.spatial_attn(x) + x
         x = self.spatial_mlp(x) + x
-        
+
         # Reshape for temporal attention
         B, T, J, C = x.shape
-        x = x.view(B * J, T, C)
-        
-        # Apply temporal attention and MLP
-        x = self.temporal_attn(x) + x
+        x = x.permute(0, 2, 1, 3).contiguous().view(B * J, T, C)  # Rearrange for temporal attention
+
+        # Temporal attention and MLP
+        x = self.temporal_attn(x, is_temporal=True) + x
         x = self.temporal_mlp(x) + x
-        
+
         # Reshape back to original shape
-        x = x.view(B, T, J, C)
+        x = x.view(B, J, T, C).permute(0, 2, 1, 3).contiguous()  # Restore original shape
         return x
+
+
+
+
 
 
 class AttentionBlock(nn.Module):
@@ -93,13 +97,23 @@ class AttentionBlock(nn.Module):
         self.attention = nn.MultiheadAttention(dim_feat, num_heads, dropout=drop_rate, batch_first=True)
         self.norm = nn.LayerNorm(dim_feat)
 
-    def forward(self, x):
-        B, T, J, C = x.shape
-        x = x.view(B, T * J, C)  # Flatten spatial and temporal dimensions
-        x, _ = self.attention(x, x, x)
-        x = self.norm(x)
-        x = x.view(B, T, J, C)  # Reshape back
-        return x
+    def forward(self, x, is_temporal=False):
+        if is_temporal:
+            # Input shape: (B*J, T, C)
+            BJ, T, C = x.shape
+            x, _ = self.attention(x, x, x)
+            x = self.norm(x)
+            return x  # No reshaping needed
+        else:
+            # Input shape: (B, T, J, C)
+            B, T, J, C = x.shape
+            x = x.view(B, T * J, C)  # Flatten spatial and temporal dimensions
+            x, _ = self.attention(x, x, x)
+            x = self.norm(x)
+            x = x.view(B, T, J, C)  # Reshape back
+            return x
+
+
 
 
 class MLPBlock(nn.Module):

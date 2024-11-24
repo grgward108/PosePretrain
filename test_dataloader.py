@@ -30,12 +30,15 @@ dataset.read_data(amass_datasets, amass_dir)
 print("[INFO] Creating body representations...")
 dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
 
+
 # Print dataset size
 print(f"[INFO] Total clips in dataset: {len(dataset)}")
 
 
 # Create a DataLoader
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, drop_last=True)
+
+
 
 # Inspect a batch of data
 print("[INFO] Inspecting loaded data...")

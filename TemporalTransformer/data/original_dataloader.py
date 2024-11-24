@@ -27,7 +27,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class MotionLoader(data.Dataset):
-    def __init__(self, clip_seconds=8, clip_fps=30, normalize=False, split='train', markers_type=None, mode=None, is_debug=False, mask_ratio=0.0, log_dir=''):
+    def __init__(self, clip_seconds=8, clip_fps=30, normalize=False, split='train', markers_type=None, mode=None, is_debug=False, log_dir=''):
         """
         markers_type = ['f0_p0, f15_p0, f0_p5, f15_p5, f0_p22, f15_p22']
         f{m}_p{n}: m, n are the number of markers on the single-hand finger and palm respetively.
@@ -48,7 +48,6 @@ class MotionLoader(data.Dataset):
         self.is_debug = is_debug
         self.markers_type = markers_type
         self.log_dir = log_dir
-        self.mask_ratio = mask_ratio
 
         assert self.markers_type is not None
 
@@ -74,22 +73,6 @@ class MotionLoader(data.Dataset):
 
 
         print(f"Number of markers selected for '{self.markers_type}': {len(self.markers_ids)}")
-
-    def apply_masking(self, clip_img):
-        """
-        Apply masking to random frames based on the mask_ratio.
-        """
-        num_frames = clip_img.shape[0]  # Number of frames in the clip
-        mask = torch.ones(num_frames, dtype=torch.float32)  # Initialize mask with ones
-        num_masked_frames = int(self.mask_ratio * num_frames)
-
-        if num_masked_frames > 0:
-            # Randomly select frames to mask
-            masked_indices = torch.randperm(num_frames)[:num_masked_frames]
-            mask[masked_indices] = 0.0  # Set masked frames to 0
-            clip_img[masked_indices] = 0.0  # Zero out the masked frames
-
-        return clip_img, mask
 
 
 
@@ -220,6 +203,10 @@ class MotionLoader(data.Dataset):
                         # markers = torch.matmul(markers - markers_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3]
                         markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3]
 
+
+
+
+
                 ######## obtain binary contact labels
                 if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan']:
                     # left_heel_id, right_heel_id = 7, 8, left_toe, right_toe = 10, 11
@@ -338,10 +325,14 @@ class MotionLoader(data.Dataset):
 
                     cur_body[:, :, [1, 2]] = cur_body[:, :, [2, 1]]
                     cur_body = cur_body[0:-1, 1:, :]  # [T-1, 25 or 68, 3]
+                    cur_body = cur_body.reshape(len(cur_body), -1)  # [T-1, 75 or 204]
 
                     if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
                         # global vel (3) + local pose (25*3) + contact label (4)
-                        cur_body = cur_body
+                        global_vel = np.concatenate([velocity[:, :, 0], velocity[:, :, 2], rvelocity], axis=-1)
+                        cur_body = np.concatenate([global_vel, cur_body, contact_lbls[0:-1]], axis=-1)  # [T-1, d=3+75(204)+4]
+
+
 
                     elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
                         channel_local = np.concatenate([cur_body, contact_lbls[0:-1]], axis=-1)[np.newaxis, :, :]  # [1, T-1, d=75(204)+4]
@@ -354,30 +345,72 @@ class MotionLoader(data.Dataset):
                         cur_body = np.concatenate([channel_local, channel_global_x, channel_global_y, channel_global_r], axis=0)  # [4, T-1, d]
 
 
-
-
             self.clip_img_list.append(cur_body)
-
 
         self.clip_img_list = np.asarray(self.clip_img_list)  # [N, T-1, d] / [N, 4, T-1, d]
 
         if self.normalize:
-            prefix = os.path.join(self.log_dir, 'statistics')
-            epsilon = 1e-6  # To handle zero std
+            prefix = os.path.join(self.log_dir, 'statistics')  # 'prestats_amass_use_grab_marker'
+            if with_hand:
+                prefix += '_withHand'
+            # Xmean = self.clip_img_list.mean(axis=1).mean(axis=0)[np.newaxis, np.newaxis, :]  # [d]
+            # Xstd = np.ones(self.clip_img_list.shape[-1]) * self.clip_img_list.std()  # [d]
 
             if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
-                Xmean = self.clip_img_list.mean(axis=(0, 1))  # Compute mean across all clips and frames
-                Xstd = self.clip_img_list.std(axis=(0, 1))    # Compute std across all clips and frames
-                Xstd = np.maximum(Xstd, epsilon)             # Avoid division by zero
+                Xmean = self.clip_img_list.mean(axis=1).mean(axis=0)  # [1, 1, d]
+                Xmean[-4:] = 0.0
+
+                Xstd = np.ones(self.clip_img_list.shape[-1])
+                Xstd[0:2] = self.clip_img_list[:, :, 0:2].std()  # global traj vel x/y
+                Xstd[2] = self.clip_img_list[:, :, 2].std()  # rotation vel
+                Xstd[3:-4] = self.clip_img_list[:, :, 3:-4].std()  # local joints
+                Xstd[-4:] = 1.0
 
                 if self.split == 'train':
-                    np.savez_compressed(f"{prefix}_{self.mode}.npz", Xmean=Xmean, Xstd=Xstd)
+                    np.savez_compressed('{}_{}.npz'.format(prefix, self.mode), Xmean=Xmean, Xstd=Xstd)
                     self.clip_img_list = (self.clip_img_list - Xmean) / Xstd
                 elif self.split == 'test':
-                    stats = np.load(f"{prefix}_{self.mode}.npz")
+                    stats = np.load('{}_{}.npz'.format(prefix, self.mode))
                     self.clip_img_list = (self.clip_img_list - stats['Xmean']) / stats['Xstd']
 
+            elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
+                d = self.clip_img_list.shape[-1]
+                Xmean_local = self.clip_img_list[:, 0].mean(axis=1).mean(axis=0)  # [d]
+                Xmean_local[-4:] = 0.0
+                Xstd_local = np.ones(d)
+                Xstd_local[0:] = self.clip_img_list[:, 0].std()  # [d]
+                Xstd_local[-4:] = 1.0
 
+                Xmean_global_xy = self.clip_img_list[:, 1:3].mean()  # scalar
+                Xstd_global_xy = self.clip_img_list[:, 1:3].std()  # scalar
+
+                Xmean_global_r = self.clip_img_list[:, 3].mean()  # scalar
+                Xstd_global_r = self.clip_img_list[:, 3].std()  # scalar
+
+                if self.split == 'train':
+                    np.savez_compressed('{}_{}.npz'.format(prefix, self.mode),
+                                        Xmean_local=Xmean_local, Xstd_local=Xstd_local,
+                                        Xmean_global_xy=Xmean_global_xy, Xstd_global_xy=Xstd_global_xy,
+                                        Xmean_global_r=Xmean_global_r, Xstd_global_r=Xstd_global_r)
+
+                    self.clip_img_list[:, 0] = (self.clip_img_list[:, 0] - Xmean_local) / Xstd_local
+                    self.clip_img_list[:, 1:3] = (self.clip_img_list[:, 1:3] - Xmean_global_xy) / Xstd_global_xy
+                    self.clip_img_list[:, 3] = (self.clip_img_list[:, 3] - Xmean_global_r) / Xstd_global_r
+                elif self.split == 'test':
+                    stats = np.load('{}_{}.npz'.format(prefix, self.mode))
+                    self.clip_img_list[:, 0] = (self.clip_img_list[:, 0] - stats['Xmean_local']) / stats['Xstd_local']
+                    self.clip_img_list[:, 1:3] = (self.clip_img_list[:, 1:3] - stats['Xmean_global_xy']) / stats['Xstd_global_xy']
+                    self.clip_img_list[:, 3] = (self.clip_img_list[:, 3] - stats['Xmean_global_r']) / stats['Xstd_global_r']
+
+
+        # self.clip_img_list: [N, T-1, d] / [N, 4, T-1, d]
+        if self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
+            print('max/min value in  motion clip: local joints',
+                  np.max(self.clip_img_list[:, 0]), np.min(self.clip_img_list[:, 0]))
+            print('max/min value in  motion clip: global traj',
+                  np.max(self.clip_img_list[:, 1:3]), np.min(self.clip_img_list[:, 1:3]))
+            print('max/min value in  motion clip: global rot',
+                  np.max(self.clip_img_list[:, 3]), np.min(self.clip_img_list[:, 3]))
 
         print('[INFO] motion clip imgs created.')
 
@@ -388,16 +421,8 @@ class MotionLoader(data.Dataset):
 
     def __getitem__(self, index):
         if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
-            original_clip = torch.from_numpy(self.clip_img_list[index]).float()  # [T, num_markers, 3]
-            masked_clip = original_clip.clone()  # Make a copy for masking
-
-            if self.mask_ratio > 0.0:
-                masked_clip, mask = self.apply_masking(masked_clip)  # Apply masking
-            else:
-                mask = torch.ones(original_clip.shape[0], dtype=torch.float32)  # All frames visible
-
-            return masked_clip, mask, original_clip
-
+            clip_img = self.clip_img_list[index]  # [T, d] d dims of body representation
+            clip_img = torch.from_numpy(clip_img).float().permute(1, 0).unsqueeze(0)  # [1, d, T]
         elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
             clip_img = self.clip_img_list[index]  # [4, T, d]
             clip_img = torch.from_numpy(clip_img).float().permute(0, 2, 1)  # [4, d, T]
