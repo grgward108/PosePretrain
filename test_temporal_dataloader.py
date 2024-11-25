@@ -1,15 +1,20 @@
 import os
 import torch
-from TemporalTransformer.data.dataloader import MotionLoader
+import numpy as np
+from TemporalTransformer.data.original_dataloader import MotionLoader
 
 # Parameters for testing
-amass_datasets = ['HumanEva']
+amass_datasets = ['CMU']
 amass_dir = '../../../data/edwarde/dataset/AMASS'
 smplx_model_path = 'body_utils/body_models'
 clip_seconds = 2
 clip_fps = 30
 markers_type = 'f15_p22'  # Example markers type
-mode = 'local_joints_3dv'  # Choose mode to test
+mode = 'local_markers_3dv'  # Choose mode to test
+output_folder = "./temporal_datadump"  # Directory to save output
+
+# Ensure the output directory exists
+os.makedirs(output_folder, exist_ok=True)
 
 # Initialize the MotionLoader
 print("[INFO] Initializing MotionLoader...")
@@ -30,22 +35,8 @@ dataset.read_data(amass_datasets, amass_dir)
 print("[INFO] Creating body representations...")
 dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
 
+# Save only the first batch of processed data
+first_batch_file = os.path.join(output_folder, f"{amass_datasets[0]}_first_batch.npz")
+np.savez_compressed(first_batch_file, data=dataset.clip_img_list[0])
+print(f"[INFO] First batch saved to {first_batch_file}")
 
-# Print dataset size
-print(f"[INFO] Total clips in dataset: {len(dataset)}")
-
-
-# Create a DataLoader
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, drop_last=True)
-
-
-
-# Inspect a batch of data
-print("[INFO] Inspecting loaded data...")
-for batch_idx, batch in enumerate(dataloader):
-    print(f"Batch {batch_idx + 1}:")
-    for data in batch:
-        print(f"Data shape: {data.shape}")
-        print(f"Data sample:\n{data[0]}")
-    # Stop after one batch to avoid excessive printing
-    break

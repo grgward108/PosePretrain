@@ -290,7 +290,7 @@ class MotionLoader(data.Dataset):
                 if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan']:
                     cur_body = body_joints  # [T, 25, 3]
                 if self.mode in ['local_markers_3dv', 'local_markers_3dv_4chan']:
-                    cur_body = torch.cat([body_joints[:, 0:1], markers], dim=1)  # first row: pelvis joint [T, 67+1, 3]
+                    cur_body = markers  # [T, n_marker, 3]
 
                 ############################# local joints from Holten ###############################
                 if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan',

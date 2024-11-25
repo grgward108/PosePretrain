@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 def main():
 
     # Parameters for testing
-    amass_datasets = ['CMU']
+    amass_datasets = ['HumanEva']
     amass_dir = '../../../data/edwarde/dataset/AMASS'
     smplx_model_path = 'body_utils/body_models'
     markers_type = 'f15_p22'
@@ -31,7 +31,7 @@ def main():
         batch_size=8,
         shuffle=True,
         collate_fn=dataset.collate_fn,
-        num_workers=0  # Adjust as needed
+        num_workers=4  # Adjust as needed
     )
 
     # Iterate over the dataloader
@@ -49,7 +49,7 @@ def main():
         print("Saving the first sample to a file...")
 
         # Save to a .npz file
-        output_file = "CMU_sample_markers.npz"
+        output_file = "HumanEva_sample_markers.npz"
         np.savez_compressed(output_file, markers=first_sample, part_labels=first_part_labels)
         print(f"Markers and part labels saved to '{output_file}'.")
 

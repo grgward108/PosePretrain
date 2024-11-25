@@ -5,8 +5,7 @@ from SpatialTransformer.data.original_dataloader import FrameLoader
 from torch.utils import data
 
 # Parameters for testing
-amass_datasets = ['HumanEva', 'CMU']
-amass_dir = '../../../data/edwarde/dataset/AMASS'
+amass_dir = '../../../data/edwarde/dataset/AMASS/CMU'
 smplx_model_path = 'body_utils/body_models'
 markers_type = 'f15_p22'  # Example markers type
 normalize = True
@@ -18,7 +17,6 @@ dataset = FrameLoader(
     smplx_model_path=smplx_model_path,
     markers_type=markers_type,
     normalize=normalize,
-    dataset_list=amass_datasets  # Data will be loaded automatically
 )
 
 dataloader = data.DataLoader(dataset, batch_size=8, shuffle=True)

@@ -11,7 +11,7 @@ from tqdm import tqdm
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class FrameLoader(data.Dataset):
-    def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22', dataset_list=None, normalize=True):
+    def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22', normalize=True):
         """
         Frame-based dataloader with part labels and marker positions.
 
@@ -50,54 +50,6 @@ class FrameLoader(data.Dataset):
         }
 
         self._load_frames()
-
-        if dataset_list:
-            self.read_data(dataset_list, dataset_dir)
-
-    def read_data(self, dataset_list, dataset_dir):
-        """
-        Read data from a list of datasets, calculate the total number of frames.
-
-        Args:
-            dataset_list (list): List of dataset names to load.
-            dataset_dir (str): Path to the datasets directory.
-        """
-        total_frames = 0
-        for dataset_name in tqdm(dataset_list, desc="Processing datasets"):
-            dataset_path = os.path.join(dataset_dir, dataset_name)
-            if not os.path.exists(dataset_path):
-                print(f"[WARNING] Dataset '{dataset_name}' not found at {dataset_path}. Skipping.")
-                continue
-            
-            # Glob all files for the dataset
-            npz_files = glob.glob(os.path.join(dataset_path, '**', '*_poses.npz'), recursive=True)
-            if not npz_files:
-                print(f"[WARNING] No data found for dataset '{dataset_name}'.")
-                continue
-
-            for npz_file in npz_files:
-                try:
-                    data = np.load(npz_file)
-                    num_frames = len(data['poses'])  # Count frames in this file
-                    total_frames += num_frames
-
-                    # Add frame data to the data list
-                    for frame_idx in range(num_frames):
-                        self.data_list.append({
-                            'trans': data['trans'][frame_idx],  # Translation
-                            'poses': data['poses'][frame_idx],  # Pose parameters
-                            'betas': data['betas'],            # Shape parameters
-                            'gender': str(data['gender'])      # Gender
-                        })
-
-                except Exception as e:
-                    print(f"[ERROR] Failed to load file '{npz_file}': {e}")
-                    continue
-
-        self.n_samples = len(self.data_list)
-        print(f"[INFO] Loaded {self.n_samples} frames from {len(dataset_list)} datasets.")
-        print(f"[INFO] Total number of frames across all datasets: {total_frames}")
-
 
     def _get_marker_indices(self, markers_type):
         """
@@ -148,13 +100,16 @@ class FrameLoader(data.Dataset):
         return part_labels
 
     def _load_frames(self):
-        """
+        """ 
         Load all frames from the dataset and store them as independent data points.
         """
         npz_files = glob.glob(os.path.join(self.dataset_dir, '**', '*_poses.npz'), recursive=True)
+        total_frames = 0  # Initialize a counter for total frames
+
         for npz_file in tqdm(npz_files, desc="Loading frames"):
             data = np.load(npz_file)
             seq_len = len(data['poses'])
+            total_frames += seq_len  # Update total frames counter
             for frame_idx in range(seq_len):
                 self.data_list.append({
                     'trans': data['trans'][frame_idx],  # Translation
@@ -162,6 +117,10 @@ class FrameLoader(data.Dataset):
                     'betas': data['betas'],            # Shape parameters
                     'gender': str(data['gender'])      # Gender
                 })
+
+        # Print the total number of frames loaded
+        print(f"[INFO] Total frames loaded: {total_frames}")
+
 
     def _create_frame_repr(self, frame):
         """
