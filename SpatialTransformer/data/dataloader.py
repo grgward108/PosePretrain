@@ -173,11 +173,6 @@ class FrameLoader(data.Dataset):
             'expression': torch.tensor(expression, device=device, dtype=torch.float32)  # Add expression
         }
 
-        # Log the shapes of body parameters
-        print("[INFO] Body parameters:")
-        for key, value in body_params.items():
-            print(f"  {key}: {value.shape}")
-
         # Separate indices by gender
         male_indices = [i for i, g in enumerate(valid_genders) if g == 'male']
         female_indices = [i for i, g in enumerate(valid_genders) if g == 'female']
