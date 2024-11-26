@@ -111,6 +111,7 @@ class FrameLoader(data.Dataset):
         frames = [sample['frame'] for sample in batch]
         genders = [sample['gender'] for sample in batch]
 
+        # Process frames to extract markers and part labels
         markers, part_labels = self.batch_process_frames(frames, genders)
 
         # Generate and apply mask if masking is enabled
@@ -126,11 +127,14 @@ class FrameLoader(data.Dataset):
             markers_masked = markers
             mask = torch.zeros_like(markers[:, :, 0], dtype=torch.bool)  # No masking applied
 
+        # Return both masked and original markers
         return {
-            'markers': markers_masked,  # [batch_size, n_markers, 3]
-            'part_labels': part_labels,  # [batch_size, n_markers]
-            'mask': mask  # [batch_size, n_markers], boolean mask
+            'markers': markers_masked,     # Masked markers (input to the model)
+            'original_markers': markers,  # Original unmasked markers (ground truth for loss computation)
+            'part_labels': part_labels,    # [batch_size, n_markers]
+            'mask': mask                   # [batch_size, n_markers], boolean mask
         }
+
 
     def batch_process_frames(self, frames, genders):
         """

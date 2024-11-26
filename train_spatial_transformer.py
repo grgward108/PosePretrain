@@ -66,23 +66,29 @@ def train(model, dataloader, optimizer, epoch, logger):
     epoch_loss = 0.0
 
     for batch in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
-        markers = batch['markers'].to(DEVICE)          # [bs, n_markers, 3]
-        part_labels = batch['part_labels'].to(DEVICE)  # [bs, n_markers]
-        mask = batch['mask'].to(DEVICE)                # [bs, n_markers]
+        # Get masked markers, original markers, part labels, and mask
+        markers = batch['markers'].to(DEVICE)              # Masked markers (input to the model)
+        original_markers = batch['original_markers'].to(DEVICE)  # Unmasked markers (ground truth)
+        part_labels = batch['part_labels'].to(DEVICE)
+        mask = batch['mask'].to(DEVICE)
 
         # Forward pass
         optimizer.zero_grad()
         reconstructed_markers = model(markers, part_labels, mask=mask)
 
-        # Compute Loss only on masked markers
-        # Mask shape: [bs, n_markers]
-        # We need to expand mask to match markers shape
-        mask_expanded = mask.unsqueeze(-1)  # [bs, n_markers, 1]
+        # Expand mask for loss computation
+        mask_expanded = mask.unsqueeze(-1)  # Shape: [batch_size, n_markers, 1]
 
-        # Calculate loss only for masked markers
-        loss = criterion(reconstructed_markers * mask_expanded, markers * mask_expanded)
+        # Compute loss only on masked markers
+        masked_elements = mask_expanded.sum()
+        if masked_elements > 0:
+            loss = criterion(reconstructed_markers * mask_expanded, original_markers * mask_expanded)
+            loss = loss / masked_elements  # Normalize by the number of masked elements
+        else:
+            # If no elements are masked, skip the batch
+            continue
 
-        # Backward pass
+        # Backward pass and optimization
         loss.backward()
         optimizer.step()
 
@@ -93,34 +99,31 @@ def train(model, dataloader, optimizer, epoch, logger):
     return avg_loss
 
 
-
 def validate(model, dataloader, epoch, logger):
-    """Validation loop."""
     model.eval()
     epoch_loss = 0.0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"Validation Epoch {epoch + 1}"):
-            markers = batch['markers'].to(DEVICE)          # [batch_size, n_markers, 3]
-            part_labels = batch['part_labels'].to(DEVICE)  # [batch_size, n_markers]
-            mask = batch['mask'].to(DEVICE)                # [batch_size, n_markers]
+            # Get masked markers, original markers, part labels, and mask
+            markers = batch['markers'].to(DEVICE)              # Masked markers (input to the model)
+            original_markers = batch['original_markers'].to(DEVICE)  # Unmasked markers (ground truth)
+            part_labels = batch['part_labels'].to(DEVICE)
+            mask = batch['mask'].to(DEVICE)
 
             # Forward pass
             reconstructed_markers = model(markers, part_labels, mask=mask)
 
-            # Compute Loss only on masked markers
-            mask_expanded = mask.unsqueeze(-1)  # [batch_size, n_markers, 1]
+            # Expand mask for loss computation
+            mask_expanded = mask.unsqueeze(-1)  # Shape: [batch_size, n_markers, 1]
+
+            # Compute loss only on masked markers
             masked_elements = mask_expanded.sum()
-            num_masked = masked_elements.item()
-            logger.info(f"Number of masked markers in batch: {num_masked}")
-
-
-
             if masked_elements > 0:
-                loss = criterion(reconstructed_markers * mask_expanded, markers * mask_expanded)
+                loss = criterion(reconstructed_markers * mask_expanded, original_markers * mask_expanded)
                 loss = loss / masked_elements  # Normalize by the number of masked elements
             else:
-                loss = torch.tensor(0.0).to(DEVICE)
+                continue
 
             epoch_loss += loss.item()
 
@@ -201,8 +204,8 @@ def main(exp_name):
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
         train_loss = train(model, train_loader, optimizer, epoch, logger)
 
-        # Perform validation every 10 epochs
-        if (epoch + 1) % 10 == 0:
+        # Perform validation every 3 epochs
+        if (epoch + 1) % 1 == 0:
             val_loss = validate(model, val_loader, epoch, logger)
 
             # Save Best Model if Validation Improves
