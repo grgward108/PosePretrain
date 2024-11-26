@@ -10,7 +10,7 @@ from tqdm import tqdm
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class FrameLoader(data.Dataset):
-    def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22', dataset_list=None, normalize=True):
+    def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22', dataset_list=None, normalize=True, apply_masking=False, masking_ratio=0.15):
         """
         Frame-based dataloader with part labels and marker positions.
 
@@ -60,6 +60,9 @@ class FrameLoader(data.Dataset):
 
         self.samples = self._build_index(dataset_list)
 
+        self.apply_masking = apply_masking
+        self.masking_ratio = masking_ratio
+
     def _build_index(self, dataset_list=None):
         """
         Build an index of all frames across datasets, without loading them into memory.
@@ -101,7 +104,6 @@ class FrameLoader(data.Dataset):
         print(f"[INFO] Total number of frames across all datasets: {total_frames}")
         return samples
 
-    
     def collate_fn(self, batch):
         """
         Custom collate function to process a batch of frames.
@@ -110,9 +112,24 @@ class FrameLoader(data.Dataset):
         genders = [sample['gender'] for sample in batch]
 
         markers, part_labels = self.batch_process_frames(frames, genders)
+
+        # Generate and apply mask if masking is enabled
+        if self.apply_masking:
+            # Create a mask with the same shape as markers: [batch_size, n_markers]
+            mask = torch.rand(markers.shape[:2]) < self.masking_ratio  # True where markers are masked
+            mask = mask.to(markers.device)
+
+            # Apply the mask to markers (e.g., set masked markers to zero)
+            markers_masked = markers.clone()
+            markers_masked[mask] = 0.0  # Or any placeholder value
+        else:
+            markers_masked = markers
+            mask = torch.zeros_like(markers[:, :, 0], dtype=torch.bool)  # No masking applied
+
         return {
-            'markers': markers,          # [batch_size, n_markers, 3]
-            'part_labels': part_labels   # [batch_size, n_markers]
+            'markers': markers_masked,  # [batch_size, n_markers, 3]
+            'part_labels': part_labels,  # [batch_size, n_markers]
+            'mask': mask  # [batch_size, n_markers], boolean mask
         }
 
     def batch_process_frames(self, frames, genders):

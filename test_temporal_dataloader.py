@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from TemporalTransformer.data.original_dataloader import MotionLoader
+from TemporalTransformer.data.dataloader import MotionLoader
 
 # Parameters for testing
 amass_datasets = ['CMU']
@@ -35,8 +35,10 @@ dataset.read_data(amass_datasets, amass_dir)
 print("[INFO] Creating body representations...")
 dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
 
-# Save only the first batch of processed data
-first_batch_file = os.path.join(output_folder, f"{amass_datasets[0]}_first_batch.npz")
-np.savez_compressed(first_batch_file, data=dataset.clip_img_list[0])
-print(f"[INFO] First batch saved to {first_batch_file}")
+# Save only the first batch of processed data and print its shape
+first_batch_data = dataset.clip_img_list[0]  # Get the first batch
+print(f"[INFO] Shape of the first batch: {np.array(first_batch_data).shape}")
 
+first_batch_file = os.path.join(output_folder, f"{amass_datasets[0]}_first_batch_Test_marker.npz")
+np.savez_compressed(first_batch_file, data=first_batch_data)
+print(f"[INFO] First batch saved to {first_batch_file}")

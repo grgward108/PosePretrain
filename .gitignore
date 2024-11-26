@@ -3,3 +3,5 @@ dataset/
 utils/__pycache__
 logs
 temporal_datadump/
+spatial_log/
+SpatialTransformer/data/__pycache__

@@ -9,3 +9,13 @@ This module has 2 transformers, Temporal Transformer and Spatial Transformer.
 
 - Pretrain a transformer model on extensive datasets.
 - Improve the model's ability to understand and predict human markers in various spatial contexts.
+
+## Spatial Transformer
+- Using a masking strategy to train the transformer to recover missing markers 
+- Marker representation here is 143 markers.
+- The objective is to train the Spatial Transformer to understand the spatial relationships between markers
+
+## Temporal Transformer
+- Using a masking strategy to train transformer to recover missing frames 
+- Marker representation here is 25 joints. 
+- The objective is to train the Temporal Transformer to understand the temporal relationships between markers
