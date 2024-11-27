@@ -12,7 +12,7 @@ import logging  # Import logging for logging functionality
 import numpy as np 
 
 # Hyperparameters
-BATCH_SIZE = 8
+BATCH_SIZE = 16
 LEARNING_RATE = 2e-4
 
 NUM_EPOCHS = 50
@@ -129,13 +129,12 @@ def save_reconstruction_npz(markers, reconstructed_markers, original_markers, ma
 def validate(model, dataloader, epoch, logger, save_dir):
     model.eval()
     epoch_loss = 0.0
-    valid_batches = 0  # Track the number of valid batches
+    valid_batches = 0
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Validation Epoch {epoch + 1}")):
-            # Get masked markers, original markers, part labels, and mask
-            markers = batch['markers'].to(DEVICE)
-            original_markers = batch['original_markers'].to(DEVICE)
+            markers = batch['markers'].to(DEVICE)              # Masked markers (input to the model)
+            original_markers = batch['original_markers'].to(DEVICE)  # Unmasked markers (ground truth)
             part_labels = batch['part_labels'].to(DEVICE)
             mask = batch['mask'].to(DEVICE)
 
@@ -145,23 +144,38 @@ def validate(model, dataloader, epoch, logger, save_dir):
             # Expand mask for loss computation
             mask_expanded = mask.unsqueeze(-1)
 
-            # Compute loss only on masked markers
+            # Compute losses
+            diff = reconstructed_markers - original_markers
+            raw_loss = (diff ** 2).mean()  # MSE over all markers
+
             masked_elements = mask_expanded.sum()
             if masked_elements > 0:
-                diff = (reconstructed_markers - original_markers) * mask_expanded
-                loss = (diff ** 2).sum() / masked_elements  # Manually compute MSE for masked markers
-                epoch_loss += loss.item()
-                valid_batches += 1  # Increment valid batch counter
+                masked_diff = diff * mask_expanded
+                masked_loss = (masked_diff ** 2).sum() / masked_elements  # MSE over masked markers
             else:
-                logger.warning("No masked elements in this batch, skipping...")
-                continue
+                masked_loss = 0.0
+
+            # Combine losses
+            alpha = 0.9
+            loss = alpha * masked_loss + (1 - alpha) * raw_loss
+
+            # Debugging: Unmasked marker reconstruction error
+            unmasked_mask = (~mask).unsqueeze(-1)  # Boolean mask for unmasked markers
+            unmasked_input = markers * unmasked_mask  # Input for unmasked markers
+            unmasked_reconstruction = reconstructed_markers * unmasked_mask  # Reconstructed unmasked markers
+            diff_unmasked = torch.abs(unmasked_input - unmasked_reconstruction)
+            mean_unmasked_error = diff_unmasked.mean().item()
+            logger.info(f"Batch {batch_idx}: Mean unmasked reconstruction error: {mean_unmasked_error:.8f}")
+
+            # Aggregate epoch loss
+            epoch_loss += loss.item()
+            valid_batches += 1
 
             # Save reconstruction for the first batch
             if batch_idx == 0:
                 logger.info("Saving reconstruction examples from the first validation batch...")
                 save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch)
 
-        # Compute average loss only over valid batches
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
         else:
