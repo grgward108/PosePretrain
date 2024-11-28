@@ -32,19 +32,17 @@ class FrameLoader(data.Dataset):
 
         self.smplx_model_male = smplx.create(
             smplx_model_path, model_type='smplx', gender='male', ext='npz',
-            use_pca=False, flat_hand_mean=True,
-            create_global_orient=True, create_body_pose=True, create_betas=True,
-            create_left_hand_pose=True, create_right_hand_pose=True, create_expression=True,
-            create_jaw_pose=True, create_leye_pose=True, create_reye_pose=True, create_transl=True
+            use_pca=False, flat_hand_mean=True, use_face_contour=False,  # Disable face-related vertices
+            create_body_pose=True, create_global_orient=True, create_betas=True, create_transl=True
         ).to(device)
 
         self.smplx_model_female = smplx.create(
             smplx_model_path, model_type='smplx', gender='female', ext='npz',
-            use_pca=False, flat_hand_mean=True,
-            create_global_orient=True, create_body_pose=True, create_betas=True,
-            create_left_hand_pose=True, create_right_hand_pose=True, create_expression=True,
-            create_jaw_pose=True, create_leye_pose=True, create_reye_pose=True, create_transl=True
+            use_pca=False, flat_hand_mean=True, use_face_contour=False,  # Disable face-related vertices
+            create_body_pose=True, create_global_orient=True, create_betas=True, create_transl=True
         ).to(device)
+
+
 
 
         self.body_part_groups = {
@@ -117,8 +115,8 @@ class FrameLoader(data.Dataset):
         frames = [sample['frame'] for sample in batch]
         genders = [sample['gender'] for sample in batch]
 
-        # Process frames to extract markers and part labels
-        markers, part_labels = self.batch_process_frames(frames, genders)
+        # Process frames to extract markers, part labels, and joints
+        markers, part_labels, joints = self.batch_process_frames(frames, genders)
 
         # Generate and apply mask if masking is enabled
         if self.apply_masking:
@@ -133,13 +131,21 @@ class FrameLoader(data.Dataset):
             markers_masked = markers
             mask = torch.zeros_like(markers[:, :, 0], dtype=torch.bool)  # No masking applied
 
-        # Return both masked and original markers
+        # Convert joints to NumPy if needed for downstream processing
+        if isinstance(joints, torch.Tensor):
+            joints_np = joints.cpu().numpy()
+        else:
+            joints_np = joints  # If already NumPy, no conversion needed
+
+        # Return processed batch
         return {
-            'markers': markers_masked,     # Masked markers (input to the model)
-            'original_markers': markers,  # Original unmasked markers (ground truth for loss computation)
+            'markers': markers_masked,      # Masked markers (input to the model)
+            'original_markers': markers,   # Original unmasked markers (ground truth for loss computation)
             'part_labels': part_labels,    # [batch_size, n_markers]
-            'mask': mask                   # [batch_size, n_markers], boolean mask
+            'mask': mask,                  # [batch_size, n_markers], boolean mask
+            'joints': joints_np            # Joints (NumPy format for downstream use)
         }
+
 
 
     def batch_process_frames(self, frames, genders):
@@ -225,6 +231,31 @@ class FrameLoader(data.Dataset):
             for idx, f_idx in enumerate(female_indices):
                 markers_list[f_idx] = female_markers[idx]
 
+        joints_list = [None] * batch_size
+
+        if male_indices:
+            male_params = {k: v[male_indices] for k, v in body_params.items()}
+            with torch.no_grad():
+                smplx_output = self.smplx_model_male(return_verts=True, **male_params)
+            male_vertices = smplx_output.vertices[:, :6890, :]  # Use only the first 6890 vertices
+            male_joints = np.einsum('ij,bjk->bik', self.j_regressor, male_vertices)
+            for idx, m_idx in enumerate(male_indices):
+                joints_list[m_idx] = male_joints[idx]
+
+        # Process female frames
+        if female_indices:
+            female_params = {k: v[female_indices] for k, v in body_params.items()}
+            with torch.no_grad():
+                smplx_output = self.smplx_model_female(return_verts=True, **female_params)
+            female_vertices = smplx_output.vertices[:, :6890, :]  # Use only the first 6890 vertices
+            female_vertices_np = female_vertices.cpu().numpy()  # Convert to NumPy
+            female_joints = np.einsum('ij,bjk->bik', self.j_regressor, female_vertices_np)  # Compute joints
+            for idx, f_idx in enumerate(female_indices):
+                joints_list[f_idx] = female_joints[idx]
+
+        # Stack joints in the original order
+        joints = np.stack(joints_list, axis=0)  # [batch_size, 17, 3]
+
         # Stack markers in the original order
         markers = torch.stack(markers_list, dim=0)  # [batch_size, n_markers, 3]
 
@@ -235,7 +266,7 @@ class FrameLoader(data.Dataset):
         # Expand part labels to match batch size
         part_labels = self.part_labels.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_markers]
 
-        return markers, part_labels
+        return markers, part_labels, joints
 
 
 
