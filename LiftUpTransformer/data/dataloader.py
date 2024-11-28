@@ -210,8 +210,8 @@ class FrameLoader(data.Dataset):
         male_indices = [i for i, g in enumerate(valid_genders) if g == 'male']
         female_indices = [i for i, g in enumerate(valid_genders) if g == 'female']
 
-        # Initialize markers list
         markers_list = [None] * batch_size
+        joints_list = [None] * batch_size  # Initialize joints list
 
         # Process male frames
         if male_indices:
@@ -219,27 +219,10 @@ class FrameLoader(data.Dataset):
             with torch.no_grad():
                 smplx_output = self.smplx_model_male(return_verts=True, **male_params)
             male_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_male, n_markers, 3]
+            male_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
+
             for idx, m_idx in enumerate(male_indices):
                 markers_list[m_idx] = male_markers[idx]
-
-        # Process female frames
-        if female_indices:
-            female_params = {k: v[female_indices] for k, v in body_params.items()}
-            with torch.no_grad():
-                smplx_output = self.smplx_model_female(return_verts=True, **female_params)
-            female_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_female, n_markers, 3]
-            for idx, f_idx in enumerate(female_indices):
-                markers_list[f_idx] = female_markers[idx]
-
-        joints_list = [None] * batch_size
-
-        if male_indices:
-            male_params = {k: v[male_indices] for k, v in body_params.items()}
-            with torch.no_grad():
-                smplx_output = self.smplx_model_male(return_verts=True, **male_params)
-            male_vertices = smplx_output.vertices[:, :6890, :]  # Use only the first 6890 vertices
-            male_joints = np.einsum('ij,bjk->bik', self.j_regressor, male_vertices)
-            for idx, m_idx in enumerate(male_indices):
                 joints_list[m_idx] = male_joints[idx]
 
         # Process female frames
@@ -247,21 +230,30 @@ class FrameLoader(data.Dataset):
             female_params = {k: v[female_indices] for k, v in body_params.items()}
             with torch.no_grad():
                 smplx_output = self.smplx_model_female(return_verts=True, **female_params)
-            female_vertices = smplx_output.vertices[:, :6890, :]  # Use only the first 6890 vertices
-            female_vertices_np = female_vertices.cpu().numpy()  # Convert to NumPy
-            female_joints = np.einsum('ij,bjk->bik', self.j_regressor, female_vertices_np)  # Compute joints
+            female_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_female, n_markers, 3]
+            female_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
+
             for idx, f_idx in enumerate(female_indices):
+                markers_list[f_idx] = female_markers[idx]
                 joints_list[f_idx] = female_joints[idx]
 
         # Stack joints in the original order
-        joints = np.stack(joints_list, axis=0)  # [batch_size, 17, 3]
+        joints = torch.stack(joints_list, dim=0)  # [batch_size, 25, 3]
 
         # Stack markers in the original order
         markers = torch.stack(markers_list, dim=0)  # [batch_size, n_markers, 3]
 
         # Normalize markers if required
         if self.normalize:
-            markers -= markers.mean(dim=1, keepdim=True)
+            # Compute the mean of the markers for each batch
+            markers_mean = markers.mean(dim=1, keepdim=True)  # Shape: [batch_size, 1, 3]
+            
+            # Normalize markers by subtracting their mean
+            markers -= markers_mean
+
+            # Normalize joints by subtracting the same mean
+            joints -= markers_mean  # Apply the same mean to align joints with markers
+
 
         # Expand part labels to match batch size
         part_labels = self.part_labels.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_markers]

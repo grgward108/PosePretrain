@@ -1,7 +1,7 @@
 from LiftUpTransformer.data.dataloader import FrameLoader
 from torch.utils.data import DataLoader
 import torch
-
+import numpy as np
 
 BATCH_SIZE = 128
 LEARNING_RATE = 2e-4
@@ -44,7 +44,15 @@ data_loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=datase
 batch = next(iter(data_loader))
 
 # Extract joints
-joints = batch['original_markers'], batch['part_labels'], batch['joints']
+# Extract the original markers and joints from the batch
+original_markers = batch['original_markers'].cpu().numpy()
+joints = batch['joints']  # Already converted to NumPy in the collate_fn
+
+# Save the data to an npz file for visualization
+output_file = "liftup_06_first_batch_data.npz"
+np.savez(output_file, original_markers=original_markers, joints=joints)
+
+print(f"Data saved to {output_file}")
 
 # Visualize joints for the first batch
 print("First batch joints:")
