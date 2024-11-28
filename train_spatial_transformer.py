@@ -12,7 +12,7 @@ import logging  # Import logging for logging functionality
 import numpy as np 
 
 # Hyperparameters
-BATCH_SIZE = 16
+BATCH_SIZE = 128
 LEARNING_RATE = 2e-4
 
 NUM_EPOCHS = 50
@@ -158,14 +158,6 @@ def validate(model, dataloader, epoch, logger, save_dir):
             # Combine losses
             alpha = 0.9
             loss = alpha * masked_loss + (1 - alpha) * raw_loss
-
-            # Debugging: Unmasked marker reconstruction error
-            unmasked_mask = (~mask).unsqueeze(-1)  # Boolean mask for unmasked markers
-            unmasked_input = markers * unmasked_mask  # Input for unmasked markers
-            unmasked_reconstruction = reconstructed_markers * unmasked_mask  # Reconstructed unmasked markers
-            diff_unmasked = torch.abs(unmasked_input - unmasked_reconstruction)
-            mean_unmasked_error = diff_unmasked.mean().item()
-            logger.info(f"Batch {batch_idx}: Mean unmasked reconstruction error: {mean_unmasked_error:.8f}")
 
             # Aggregate epoch loss
             epoch_loss += loss.item()
