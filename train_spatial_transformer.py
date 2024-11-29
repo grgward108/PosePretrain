@@ -12,8 +12,8 @@ import logging  # Import logging for logging functionality
 import numpy as np 
 
 # Hyperparameters
-BATCH_SIZE = 256
-LEARNING_RATE = 0.002
+BATCH_SIZE = 128
+LEARNING_RATE = 0.0005
 
 NUM_EPOCHS = 50
 EMBED_DIM = 64
@@ -234,7 +234,7 @@ def main(exp_name):
         batch_size=BATCH_SIZE,
         shuffle=True,
         collate_fn=train_dataset.collate_fn,
-        num_workers=4  # Adjust as needed
+        num_workers=6  # Adjust as needed
     )
 
     val_loader = DataLoader(
@@ -242,7 +242,7 @@ def main(exp_name):
         batch_size=BATCH_SIZE,
         shuffle=False,
         collate_fn=val_dataset.collate_fn,
-        num_workers=4  # Adjust as needed
+        num_workers=6  # Adjust as needed
     )
 
     # Initialize Model and Optimizer
