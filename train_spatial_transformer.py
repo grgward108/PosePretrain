@@ -21,7 +21,7 @@ NUM_HEADS = 4
 NUM_LAYERS = 6
 N_PARTS = 9  # Number of body parts
 N_MARKERS = 143  # Number of markers
-MASKING_RATIO = 0.35  # Ratio of markers to mask
+MASKING_RATIO = 0.15  # Ratio of markers to mask
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Paths and Dataset Parameters
