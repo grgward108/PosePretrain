@@ -12,8 +12,8 @@ import logging  # Import logging for logging functionality
 import numpy as np 
 
 # Hyperparameters
-BATCH_SIZE = 128
-LEARNING_RATE = 2e-4
+BATCH_SIZE = 256
+LEARNING_RATE = 0.002
 
 NUM_EPOCHS = 50
 EMBED_DIM = 64
@@ -255,7 +255,8 @@ def main(exp_name):
         n_parts=N_PARTS
     ).to(DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+
 
     # Training Loop
     best_val_loss = float('inf')
