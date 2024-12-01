@@ -4,7 +4,7 @@ from models.models import SpatialTransformer
 # Define the model
 model = SpatialTransformer(
     n_markers=143,
-    embed_dim=64,
+    embed_dim=128,
     num_heads=4,
     num_layers=6,
     dropout=0.1,
