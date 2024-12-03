@@ -10,10 +10,16 @@ import torch.multiprocessing as mp
 import argparse
 import logging  # Import logging for logging functionality
 import numpy as np 
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import wandb
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import autocast, GradScaler
+
 
 # Hyperparameters
-BATCH_SIZE = 128
-LEARNING_RATE = 0.0005
+BATCH_SIZE = 256
+LEARNING_RATE = 0.001
 
 NUM_EPOCHS = 50
 EMBED_DIM = 64
@@ -25,8 +31,8 @@ MASKING_RATIO = 0.15  # Ratio of markers to mask
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Paths and Dataset Parameters
-DATASET_DIR = '../../../data/edwarde/dataset/AMASS'
-SMPLX_MODEL_PATH = 'body_utils/body_models'
+DATASET_DIR = '../../../../gs/bs/tga-openv/edwarde/AMASS'
+SMPLX_MODEL_PATH = '../../../../gs/bs/tga-openv/edwarde/body_utils/body_models'
 MARKERS_TYPE = 'f15_p22'
 NORMALIZE = True
 
@@ -68,37 +74,35 @@ def train(model, dataloader, optimizer, epoch, logger):
     epoch_loss = 0.0
 
     for batch in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
-        # Get masked markers, original markers, part labels, and mask
-        markers = batch['markers'].to(DEVICE)              # Masked markers (input to the model)
-        original_markers = batch['original_markers'].to(DEVICE)  # Unmasked markers (ground truth)
-        part_labels = batch['part_labels'].to(DEVICE)
-        mask = batch['mask'].to(DEVICE)
-
-        # Forward pass
+        # Data preparation
+        markers = batch['markers'].to(DEVICE, non_blocking=True)
+        original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)
+        part_labels = batch['part_labels'].to(DEVICE, non_blocking=True)
+        mask = batch['mask'].to(DEVICE, non_blocking=True)
         optimizer.zero_grad()
-        reconstructed_markers = model(markers, part_labels, mask=mask)
 
-        # Expand mask for loss computation
-        mask_expanded = mask.unsqueeze(-1)  # Shape: [batch_size, n_markers, 1]
+        with autocast():
+            reconstructed_markers = model(markers, part_labels, mask=mask)
+            # Loss computation
+            mask_expanded = mask.unsqueeze(-1)
+            masked_elements = mask_expanded.sum()
+            if masked_elements > 0:
+                loss = criterion(reconstructed_markers * mask_expanded, original_markers * mask_expanded)
+                loss = loss / masked_elements
+            else:
+                continue
 
-        # Compute loss only on masked markers
-        masked_elements = mask_expanded.sum()
-        if masked_elements > 0:
-            loss = criterion(reconstructed_markers * mask_expanded, original_markers * mask_expanded)
-            loss = loss / masked_elements  # Normalize by the number of masked elements
-        else:
-            # If no elements are masked, skip the batch
-            continue
-
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
+        # Backward pass with GradScaler
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         epoch_loss += loss.item()
 
     avg_loss = epoch_loss / len(dataloader)
     logger.info(f"Epoch {epoch + 1} Training Loss: {avg_loss:.8f}")
     return avg_loss
+
 
 def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
     """
@@ -133,10 +137,10 @@ def validate(model, dataloader, epoch, logger, save_dir):
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Validation Epoch {epoch + 1}")):
-            markers = batch['markers'].to(DEVICE)              # Masked markers (input to the model)
-            original_markers = batch['original_markers'].to(DEVICE)  # Unmasked markers (ground truth)
-            part_labels = batch['part_labels'].to(DEVICE)
-            mask = batch['mask'].to(DEVICE)
+            markers = batch['markers'].to(DEVICE, non_blocking=True)
+            original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)
+            part_labels = batch['part_labels'].to(DEVICE, non_blocking=True)
+            mask = batch['mask'].to(DEVICE, non_blocking=True)
 
             # Forward pass
             reconstructed_markers = model(markers, part_labels, mask=mask)
@@ -181,6 +185,9 @@ def validate(model, dataloader, epoch, logger, save_dir):
 
 def main(exp_name):
     # Set SAVE_DIR dynamically based on exp_name
+    dist.init_process_group(backend='nccl')
+    local_rank = dist.get_rank()
+    DEVICE = torch.device(f'cuda:{local_rank}')
     SAVE_DIR = os.path.join('spatial_log', exp_name, 'ckpt')
     os.makedirs(SAVE_DIR, exist_ok=True)
     logger = setup_logger(exp_name, SAVE_DIR)
@@ -198,6 +205,22 @@ def main(exp_name):
                 \t- Number of Markers: {N_MARKERS}
                 \t- Masking Ratio: {MASKING_RATIO}
                 \t- Device: {DEVICE}""")
+
+    wandb.init(entity='edward-effendy-tokyo-tech696', project='PoseTrain_Spatial', name=exp_name)
+
+    # Update WandB config
+    wandb.config.update({
+        "experiment": exp_name,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "num_epochs": NUM_EPOCHS,
+        "embed_dim": EMBED_DIM,
+        "num_heads": NUM_HEADS,
+        "num_layers": NUM_LAYERS,
+        "n_parts": N_PARTS,
+        "n_markers": N_MARKERS,
+        "masking_ratio": MASKING_RATIO,
+    })
     
 
     # Initialize Dataset and Dataloader
@@ -229,21 +252,29 @@ def main(exp_name):
     logger.info(f"[INFO] Number of validation samples: {len(val_dataset)}")
 
 
+    from torch.utils.data.distributed import DistributedSampler
+
+    train_sampler = DistributedSampler(train_dataset)
+    val_sampler = DistributedSampler(val_dataset)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        sampler=train_sampler,
         collate_fn=train_dataset.collate_fn,
-        num_workers=6  # Adjust as needed
+        num_workers=8,
+        pin_memory=True
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=False,
+        sampler=val_sampler,
         collate_fn=val_dataset.collate_fn,
-        num_workers=6  # Adjust as needed
+        num_workers=6,
+        pin_memory=True
     )
+
 
     # Initialize Model and Optimizer
     logger.info("[INFO] Initializing Model...")
@@ -255,41 +286,57 @@ def main(exp_name):
         n_parts=N_PARTS
     ).to(DEVICE)
 
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
+
+
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
+
 
 
     # Training Loop
     best_val_loss = float('inf')
     for epoch in range(NUM_EPOCHS):
+        train_sampler.set_epoch(epoch)
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
         train_loss = train(model, train_loader, optimizer, epoch, logger)
 
-        # Perform validation every 3 epochs
-        if (epoch + 1) % 1 == 0:
-            val_loss = validate(model, val_loader, epoch, logger, save_dir=SAVE_DIR)
 
-            # Save Best Model if Validation Improves
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                checkpoint_path = os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth")
+        scheduler.step()
+
+        if local_rank == 0:
+            # Perform validation every 3 epochs
+            if (epoch + 1) % 2 == 0:
+                val_loss = validate(model, val_loader, epoch, logger, save_dir=SAVE_DIR)
+
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "training_loss": train_loss,
+                    "validation_loss": val_loss,
+                    "learning_rate": scheduler.get_last_lr()[0],  # Log current learning rate
+                })
+
+                # Save Best Model if Validation Improves
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint_path = os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth")
+                    torch.save(model.state_dict(), checkpoint_path)
+                    logger.info(f"[INFO] Saved Best Model to {checkpoint_path}.")
+
+            # Save checkpoint every 5 epochs
+            if (epoch + 1) % 5 == 0:
+                checkpoint_path = os.path.join(SAVE_DIR, f"model_epoch_{epoch + 1}.pth")
                 torch.save(model.state_dict(), checkpoint_path)
-                logger.info(f"[INFO] Saved Best Model to {checkpoint_path}.")
-
-        # Save checkpoint every 5 epochs
-        if (epoch + 1) % 5 == 0:
-            checkpoint_path = os.path.join(SAVE_DIR, f"model_epoch_{epoch + 1}.pth")
-            torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f"[INFO] Checkpoint saved at {checkpoint_path}.")
+                logger.info(f"[INFO] Checkpoint saved at {checkpoint_path}.")
 
     logger.info("[INFO] Training Complete.")
 
+    wandb.finish()
+
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn')
-
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Spatial Transformer Training Script")
-    parser.add_argument("--exp_name", required=True, help="Name of the experiment for logging and saving checkpoints")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--exp_name", required=True, help="Experiment name")
+    parser.add_argument("--local_rank", type=int, help="Local rank for distributed training")
     args = parser.parse_args()
-
     main(args.exp_name)

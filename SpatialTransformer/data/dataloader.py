@@ -33,7 +33,7 @@ class FrameLoader(data.Dataset):
             create_global_orient=True, create_body_pose=True, create_betas=True,
             create_left_hand_pose=True, create_right_hand_pose=True, create_expression=True,
             create_jaw_pose=True, create_leye_pose=True, create_reye_pose=True, create_transl=True
-        ).to(device)
+        )
 
         self.smplx_model_female = smplx.create(
             smplx_model_path, model_type='smplx', gender='female', ext='npz',
@@ -41,7 +41,7 @@ class FrameLoader(data.Dataset):
             create_global_orient=True, create_body_pose=True, create_betas=True,
             create_left_hand_pose=True, create_right_hand_pose=True, create_expression=True,
             create_jaw_pose=True, create_leye_pose=True, create_reye_pose=True, create_transl=True
-        ).to(device)
+        )
 
 
         self.body_part_groups = {
@@ -179,20 +179,20 @@ class FrameLoader(data.Dataset):
         reye_pose = poses[:, 162:165] if poses.shape[1] >= 165 else np.zeros((poses.shape[0], 3))
         expression = np.zeros((poses.shape[0], 10), dtype=np.float32)  # [batch_size, 10]
 
-
-        # Prepare body parameters for the SMPL-X model
+        # Remove device=device from tensor creation
         body_params = {
-            'transl': torch.tensor(transl, device=device, dtype=torch.float32),
-            'global_orient': torch.tensor(global_orient, device=device, dtype=torch.float32),
-            'body_pose': torch.tensor(body_pose, device=device, dtype=torch.float32),
-            'left_hand_pose': torch.tensor(left_hand_pose, device=device, dtype=torch.float32),
-            'right_hand_pose': torch.tensor(right_hand_pose, device=device, dtype=torch.float32),
-            'jaw_pose': torch.tensor(jaw_pose, device=device, dtype=torch.float32),
-            'leye_pose': torch.tensor(leye_pose, device=device, dtype=torch.float32),
-            'reye_pose': torch.tensor(reye_pose, device=device, dtype=torch.float32),
-            'betas': torch.tensor(betas, device=device, dtype=torch.float32),
-            'expression': torch.tensor(expression, device=device, dtype=torch.float32)  # Add expression
+            'transl': torch.tensor(transl, dtype=torch.float32),
+            'global_orient': torch.tensor(global_orient, dtype=torch.float32),
+            'body_pose': torch.tensor(body_pose, dtype=torch.float32),
+            'left_hand_pose': torch.tensor(left_hand_pose, dtype=torch.float32),
+            'right_hand_pose': torch.tensor(right_hand_pose, dtype=torch.float32),
+            'jaw_pose': torch.tensor(jaw_pose, dtype=torch.float32),
+            'leye_pose': torch.tensor(leye_pose, dtype=torch.float32),
+            'reye_pose': torch.tensor(reye_pose, dtype=torch.float32),
+            'betas': torch.tensor(betas, dtype=torch.float32),
+            'expression': torch.tensor(expression, dtype=torch.float32)
         }
+
 
         # Separate indices by gender
         male_indices = [i for i, g in enumerate(valid_genders) if g == 'male']
@@ -227,7 +227,8 @@ class FrameLoader(data.Dataset):
             markers -= markers.mean(dim=1, keepdim=True)
 
         # Expand part labels to match batch size
-        part_labels = self.part_labels.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_markers]
+        part_labels = self.part_labels.unsqueeze(0).repeat(batch_size, 1)  # [batch_size, n_markers]
+
 
         return markers, part_labels
 
@@ -245,7 +246,8 @@ class FrameLoader(data.Dataset):
         """
         f, p = markers_type.split('_')
         finger_n, palm_n = int(f[1:]), int(p[1:])
-        with open('./body_utils/smplx_markerset.json') as f:
+
+        with open('../../../../gs/bs/tga-openv/edwarde/body_utils/smplx_markerset.json') as f:
             markerset = json.load(f)['markersets']
             marker_indices = []
             for marker in markerset:
