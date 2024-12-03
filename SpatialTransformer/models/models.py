@@ -1,5 +1,8 @@
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist  # Add this import
 
 class SpatialTransformer(nn.Module):
     def __init__(self, n_markers=143, embed_dim=128, num_heads=4, num_layers=6, dropout=0.1, n_parts=9):
@@ -41,7 +44,9 @@ class SpatialTransformer(nn.Module):
 
     # models.py
 
-    def forward(self, markers, part_labels, mask=None):
+    def forward(self, inputs):
+        markers, part_labels, mask = inputs
+
         """
         Forward pass for the SpatialTransformer with masked self-attention.
 
@@ -53,6 +58,11 @@ class SpatialTransformer(nn.Module):
         Returns:
             torch.Tensor: Reconstructed markers of shape [batch_size, n_markers, 3].
         """
+        print(f"[Rank {dist.get_rank()}] Inside model.forward:")
+        print(f"  markers.device: {markers.device}")
+        print(f"  part_labels.device: {part_labels.device if part_labels is not None else 'None'}")
+        print(f"  mask.device: {mask.device if mask is not None else 'None'}")
+        print(f"  self.input_proj.weight.device: {self.input_proj.weight.device}")
         batch_size = markers.size(0)
 
         # Project marker features to embedding dimension

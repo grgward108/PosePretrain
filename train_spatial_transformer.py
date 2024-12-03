@@ -15,6 +15,8 @@ import wandb
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+
 
 
 # Hyperparameters
@@ -69,7 +71,8 @@ def setup_logger(exp_name, save_dir):
     return logger
 
 
-def train(model, dataloader, optimizer, epoch, logger):
+def train(model, dataloader, optimizer, epoch, scaler, logger, DEVICE):
+
     model.train()
     epoch_loss = 0.0
 
@@ -79,10 +82,19 @@ def train(model, dataloader, optimizer, epoch, logger):
         original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)
         part_labels = batch['part_labels'].to(DEVICE, non_blocking=True)
         mask = batch['mask'].to(DEVICE, non_blocking=True)
+
+        print(f"[Rank {dist.get_rank()}] DEVICE: {DEVICE}")
+        print(f"[Rank {dist.get_rank()}] markers.device: {markers.device}")
+        print(f"[Rank {dist.get_rank()}] part_labels.device: {part_labels.device}")
+        print(f"[Rank {dist.get_rank()}] mask.device: {mask.device}")
+        inputs = (markers, part_labels, mask)
+
+
         optimizer.zero_grad()
 
-        with autocast():
-            reconstructed_markers = model(markers, part_labels, mask=mask)
+        with autocast('cuda'):
+            
+            reconstructed_markers = model(inputs)
             # Loss computation
             mask_expanded = mask.unsqueeze(-1)
             masked_elements = mask_expanded.sum()
@@ -183,11 +195,16 @@ def validate(model, dataloader, epoch, logger, save_dir):
 
 
 
-def main(exp_name):
-    # Set SAVE_DIR dynamically based on exp_name
-    dist.init_process_group(backend='nccl')
-    local_rank = dist.get_rank()
+def main(exp_name, args):
+    local_rank = int(os.environ["LOCAL_RANK"])  # Get the local rank
     DEVICE = torch.device(f'cuda:{local_rank}')
+    torch.cuda.set_device(DEVICE)
+
+    # Initialize the process group
+    dist.init_process_group(backend='nccl', init_method='env://')
+    scaler = GradScaler()
+
+    print(f"[Process {dist.get_rank()}] Using device: {DEVICE}")
     SAVE_DIR = os.path.join('spatial_log', exp_name, 'ckpt')
     os.makedirs(SAVE_DIR, exist_ok=True)
     logger = setup_logger(exp_name, SAVE_DIR)
@@ -287,6 +304,9 @@ def main(exp_name):
     ).to(DEVICE)
 
     model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
+    # After initializing and moving the model to DEVICE
+    print(f"[Rank {dist.get_rank()}] Model parameters are on device: {next(model.parameters()).device}")
+
 
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
@@ -299,7 +319,8 @@ def main(exp_name):
     for epoch in range(NUM_EPOCHS):
         train_sampler.set_epoch(epoch)
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
-        train_loss = train(model, train_loader, optimizer, epoch, logger)
+        train_loss = train(model, train_loader, optimizer, epoch, scaler, logger, DEVICE)
+
 
 
         scheduler.step()
@@ -335,8 +356,8 @@ def main(exp_name):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", required=True, help="Experiment name")
-    parser.add_argument("--local_rank", type=int, help="Local rank for distributed training")
+    parser = argparse.ArgumentParser(description="Spatial Transformer Training Script")
+    parser.add_argument("--exp_name", required=True, help="Name of the experiment for logging and saving checkpoints")
+    parser.add_argument("--local_rank", type=int, default=0, help="Local rank for distributed training")
     args = parser.parse_args()
-    main(args.exp_name)
+    main(args.exp_name, args)
