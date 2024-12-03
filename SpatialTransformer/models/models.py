@@ -60,38 +60,35 @@ class SpatialTransformer(nn.Module):
         """
         print(f"[Rank {dist.get_rank()}] Inside model.forward:")
         print(f"  markers.device: {markers.device}")
-        print(f"  part_labels.device: {part_labels.device if part_labels is not None else 'None'}")
-        print(f"  mask.device: {mask.device if mask is not None else 'None'}")
+        print(f"  part_labels.device: {part_labels.device}")
+        print(f"  mask.device: {mask.device}")
         print(f"  self.input_proj.weight.device: {self.input_proj.weight.device}")
-        batch_size = markers.size(0)
 
-        # Project marker features to embedding dimension
-        marker_embeds = self.input_proj(markers)  # Shape: (bs, n_markers, embed_dim)
+        # After projecting markers
+        marker_embeds = self.input_proj(markers)
+        print(f"[Rank {dist.get_rank()}] marker_embeds.device after input_proj: {marker_embeds.device}")
 
-        # Apply learnable part-based embeddings
-        part_embeds = self.part_embedding(part_labels)  # Shape: (bs, n_markers, embed_dim)
-        marker_embeds = marker_embeds + part_embeds
+        # After adding part-based embeddings
+        part_embeds = self.part_embedding(part_labels)
+        marker_embeds += part_embeds
+        print(f"[Rank {dist.get_rank()}] marker_embeds.device after adding part_embeds: {marker_embeds.device}")
 
-        # Prepare the mask for the Transformer
+        # After preparing the mask
         if mask is not None:
-            # The Transformer expects masks of shape [batch_size, n_markers]
-            # Where positions with True are ignored (masked)
-            src_key_padding_mask = mask.bool()  # Convert to bool if necessary
-        else:
-            src_key_padding_mask = None
+            src_key_padding_mask = mask.bool()
+            print(f"[Rank {dist.get_rank()}] src_key_padding_mask.device: {src_key_padding_mask.device}")
+
+        # Before Transformer
+        marker_embeds = marker_embeds.permute(1, 0, 2)
+        print(f"[Rank {dist.get_rank()}] marker_embeds.device before Transformer: {marker_embeds.device}")
 
         # Transformer Encoder
-        # Note: The src_key_padding_mask argument in PyTorch's Transformer is used to mask out positions
-        # during attention calculations.
-        marker_embeds = marker_embeds.permute(1, 0, 2)  # Shape: (n_markers, batch_size, embed_dim)
-        transformer_output = self.transformer_encoder(
-            marker_embeds,
-            src_key_padding_mask=src_key_padding_mask
-        )
-        transformer_output = transformer_output.permute(1, 0, 2)  # Shape: (batch_size, n_markers, embed_dim)
+        transformer_output = self.transformer_encoder(marker_embeds, src_key_padding_mask=src_key_padding_mask)
+        transformer_output = transformer_output.permute(1, 0, 2)
+        print(f"[Rank {dist.get_rank()}] transformer_output.device: {transformer_output.device}")
 
-        # Reconstruct marker positions
-        reconstructed_markers = self.reconstruction_layer(transformer_output)  # Shape: (batch_size, n_markers, 3)
+        # Before reconstruction
+        reconstructed_markers = self.reconstruction_layer(transformer_output)
+        print(f"[Rank {dist.get_rank()}] reconstructed_markers.device: {reconstructed_markers.device}")
 
-        return reconstructed_markers
 
