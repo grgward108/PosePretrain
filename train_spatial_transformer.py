@@ -16,8 +16,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from torch.amp import autocast
-
-
+import time
 
 # Hyperparameters
 BATCH_SIZE = 256
@@ -72,37 +71,39 @@ def setup_logger(exp_name, save_dir):
 
 
 def train(model, dataloader, optimizer, epoch, scaler, logger, DEVICE):
-
     model.train()
     epoch_loss = 0.0
 
-    for batch in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
+    start_time = time.time()  # Initialize the timer
+
+    for i, batch in enumerate(tqdm(dataloader, desc=f"Training Epoch {epoch + 1}")):
+
         # Data preparation
         markers = batch['markers'].to(DEVICE, non_blocking=True)
         original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)
         part_labels = batch['part_labels'].to(DEVICE, non_blocking=True)
         mask = batch['mask'].to(DEVICE, non_blocking=True)
-
-        print(f"[Rank {dist.get_rank()}] DEVICE: {DEVICE}")
-        print(f"[Rank {dist.get_rank()}] markers.device: {markers.device}")
-        print(f"[Rank {dist.get_rank()}] part_labels.device: {part_labels.device}")
-        print(f"[Rank {dist.get_rank()}] mask.device: {mask.device}")
         inputs = (markers, part_labels, mask)
-
 
         optimizer.zero_grad()
 
         with autocast('cuda'):
-            
             reconstructed_markers = model(inputs)
             # Loss computation
+            raw_loss = criterion(reconstructed_markers, original_markers)
+
             mask_expanded = mask.unsqueeze(-1)
+            # Compute the masked loss (MSE over masked markers)
             masked_elements = mask_expanded.sum()
             if masked_elements > 0:
-                loss = criterion(reconstructed_markers * mask_expanded, original_markers * mask_expanded)
-                loss = loss / masked_elements
+                masked_diff = (reconstructed_markers - original_markers) * mask_expanded
+                masked_loss = (masked_diff ** 2).sum() / masked_elements  # Normalize by the number of masked elements
             else:
-                continue
+                masked_loss = 0.0
+
+            # Combine losses
+            alpha = 0.9
+            loss = alpha * masked_loss + (1 - alpha) * raw_loss
 
         # Backward pass with GradScaler
         scaler.scale(loss).backward()
@@ -113,34 +114,8 @@ def train(model, dataloader, optimizer, epoch, scaler, logger, DEVICE):
 
     avg_loss = epoch_loss / len(dataloader)
     logger.info(f"Epoch {epoch + 1} Training Loss: {avg_loss:.8f}")
+    logger.info(f"Rank {dist.get_rank()} | Epoch {epoch + 1} completed in {time.time() - start_time:.2f} seconds.")
     return avg_loss
-
-
-def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
-    """
-    Save reconstruction data for visualization in an .npz file.
-    Args:
-        markers (torch.Tensor): Masked input markers [batch_size, n_markers, 3].
-        reconstructed_markers (torch.Tensor): Reconstructed markers [batch_size, n_markers, 3].
-        original_markers (torch.Tensor): Ground truth markers [batch_size, n_markers, 3].
-        mask (torch.Tensor): Mask tensor [batch_size, n_markers].
-        save_dir (str): Directory to save the results.
-        epoch (int): Current epoch number.
-    """
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Convert to numpy
-    masked = markers.cpu().numpy()
-    reconstructed = reconstructed_markers.cpu().numpy()
-    ground_truth = original_markers.cpu().numpy()
-    mask_np = mask.cpu().numpy()
-
-    # Save to .npz file
-    npz_path = os.path.join(save_dir, f"epoch_{epoch}_reconstruction.npz")
-    np.savez_compressed(npz_path, masked=masked, reconstructed=reconstructed, ground_truth=ground_truth, mask=mask_np)
-    print(f"Saved reconstruction data to {npz_path}")
-
-
 
 def validate(model, dataloader, epoch, logger, save_dir):
     model.eval()
@@ -153,9 +128,10 @@ def validate(model, dataloader, epoch, logger, save_dir):
             original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)
             part_labels = batch['part_labels'].to(DEVICE, non_blocking=True)
             mask = batch['mask'].to(DEVICE, non_blocking=True)
+            inputs = (markers, part_labels, mask)
 
             # Forward pass
-            reconstructed_markers = model(markers, part_labels, mask=mask)
+            reconstructed_markers = model(inputs)
 
             # Expand mask for loss computation
             mask_expanded = mask.unsqueeze(-1)
@@ -192,6 +168,30 @@ def validate(model, dataloader, epoch, logger, save_dir):
 
     logger.info(f"Epoch {epoch + 1} Validation Loss: {avg_loss:.8f}")
     return avg_loss
+
+def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
+    """
+    Save reconstruction data for visualization in an .npz file.
+    Args:
+        markers (torch.Tensor): Masked input markers [batch_size, n_markers, 3].
+        reconstructed_markers (torch.Tensor): Reconstructed markers [batch_size, n_markers, 3].
+        original_markers (torch.Tensor): Ground truth markers [batch_size, n_markers, 3].
+        mask (torch.Tensor): Mask tensor [batch_size, n_markers].
+        save_dir (str): Directory to save the results.
+        epoch (int): Current epoch number.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Convert to numpy
+    masked = markers.cpu().numpy()
+    reconstructed = reconstructed_markers.cpu().numpy()
+    ground_truth = original_markers.cpu().numpy()
+    mask_np = mask.cpu().numpy()
+
+    # Save to .npz file
+    npz_path = os.path.join(save_dir, f"epoch_{epoch}_reconstruction.npz")
+    np.savez_compressed(npz_path, masked=masked, reconstructed=reconstructed, ground_truth=ground_truth, mask=mask_np)
+    print(f"Saved reconstruction data to {npz_path}")
 
 
 
@@ -271,7 +271,7 @@ def main(exp_name, args):
 
     from torch.utils.data.distributed import DistributedSampler
 
-    train_sampler = DistributedSampler(train_dataset)
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
     val_sampler = DistributedSampler(val_dataset)
 
     train_loader = DataLoader(
@@ -279,19 +279,19 @@ def main(exp_name, args):
         batch_size=BATCH_SIZE,
         sampler=train_sampler,
         collate_fn=train_dataset.collate_fn,
-        num_workers=8,
+        num_workers=32,
         pin_memory=True
     )
-
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         sampler=val_sampler,
         collate_fn=val_dataset.collate_fn,
-        num_workers=6,
+        num_workers=32,
         pin_memory=True
     )
-
+    print(f"Rank {dist.get_rank()} | train_loader.num_workers={train_loader.num_workers}")
+    print(f"Rank {dist.get_rank()} | val_loader.num_workers={val_loader.num_workers}")
 
     # Initialize Model and Optimizer
     logger.info("[INFO] Initializing Model...")
@@ -303,16 +303,10 @@ def main(exp_name, args):
         n_parts=N_PARTS
     ).to(DEVICE)
 
-    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
-    # After initializing and moving the model to DEVICE
-    print(f"[Rank {dist.get_rank()}] Model parameters are on device: {next(model.parameters()).device}")
-
-
+    model = DDP(model, device_ids=[DEVICE.index], output_device=DEVICE.index)
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
-
-
 
     # Training Loop
     best_val_loss = float('inf')
@@ -320,11 +314,7 @@ def main(exp_name, args):
         train_sampler.set_epoch(epoch)
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
         train_loss = train(model, train_loader, optimizer, epoch, scaler, logger, DEVICE)
-
-
-
         scheduler.step()
-
         if local_rank == 0:
             # Perform validation every 3 epochs
             if (epoch + 1) % 2 == 0:
