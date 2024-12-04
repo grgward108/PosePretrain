@@ -12,8 +12,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class FrameLoader(data.Dataset):
     def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22',
-                 dataset_list=None, normalize=True, apply_masking=False, masking_ratio=0.15,
-                 regressor_path='./J_regressor_h36m.npy'):
+                 dataset_list=None, normalize=True, apply_masking=False, masking_ratio=0.15):
         """
         Frame-based dataloader with part labels and marker positions.
 
@@ -63,9 +62,6 @@ class FrameLoader(data.Dataset):
 
         self.apply_masking = apply_masking
         self.masking_ratio = masking_ratio
-
-        self.j_regressor = np.load(regressor_path)
-        print(f"[INFO] Loaded J_regressor with shape {self.j_regressor.shape}")
 
     def _build_index(self, dataset_list=None):
         """

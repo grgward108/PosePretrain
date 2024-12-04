@@ -5,3 +5,5 @@ logs
 temporal_datadump/
 spatial_log/
 SpatialTransformer/data/__pycache__
+wandb/
+liftup_log/
