@@ -219,7 +219,7 @@ class FrameLoader(data.Dataset):
             with torch.no_grad():
                 smplx_output = self.smplx_model_male(return_verts=True, **male_params)
             male_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_male, n_markers, 3]
-            male_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
+            male_joints = smplx_output.joints[:, :22, :]  # First 25 joints for the body
 
             for idx, m_idx in enumerate(male_indices):
                 markers_list[m_idx] = male_markers[idx]
@@ -231,7 +231,7 @@ class FrameLoader(data.Dataset):
             with torch.no_grad():
                 smplx_output = self.smplx_model_female(return_verts=True, **female_params)
             female_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_female, n_markers, 3]
-            female_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
+            female_joints = smplx_output.joints[:, :22, :]  # First 25 joints for the body
 
             for idx, f_idx in enumerate(female_indices):
                 markers_list[f_idx] = female_markers[idx]
