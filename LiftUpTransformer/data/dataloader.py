@@ -7,16 +7,18 @@ import torch
 from torch.utils import data
 import smplx
 from tqdm import tqdm
+from human_body_prior.body_model.body_model import BodyModel
+import logging
+logging.basicConfig(level=logging.INFO)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class FrameLoader(data.Dataset):
     def __init__(self, dataset_dir, smplx_model_path, markers_type='f15_p22',
                  dataset_list=None, normalize=True, apply_masking=False, masking_ratio=0.15,
-                 regressor_path='./J_regressor_h36m.npy'):
+                 regressor_path='../../../../../gs/bs/tga-openv/edwarde/body_utils/J_regressor_h36m.npy'):
         """
         Frame-based dataloader with part labels and marker positions.
-
         Args:
             dataset_dir (str): Path to the dataset directory.
             smplx_model_path (str): Path to the SMPL-X model directory.
@@ -24,26 +26,49 @@ class FrameLoader(data.Dataset):
             normalize (bool): Whether to normalize marker positions.
         """
         self.dataset_dir = dataset_dir
-        self.smplx_model_path = smplx_model_path
         self.markers_type = markers_type
+        self.smplx_model_path = smplx_model_path
         self.normalize = normalize
         self.data_list = []  # List to store frame data
         self.marker_indices = self._get_marker_indices(markers_type)
 
         self.smplx_model_male = smplx.create(
             smplx_model_path, model_type='smplx', gender='male', ext='npz',
-            use_pca=False, flat_hand_mean=True, use_face_contour=False,  # Disable face-related vertices
+            use_pca=False, flat_hand_mean=True, use_face_contour=False,
             create_body_pose=True, create_global_orient=True, create_betas=True, create_transl=True
-        ).to(device)
-
+        )
         self.smplx_model_female = smplx.create(
             smplx_model_path, model_type='smplx', gender='female', ext='npz',
             use_pca=False, flat_hand_mean=True, use_face_contour=False,  # Disable face-related vertices
             create_body_pose=True, create_global_orient=True, create_betas=True, create_transl=True
-        ).to(device)
+        )
+
+
+        logging.info("Loading SMPL models...")
+
+                # Path to SMPL-H model and DMPLs
+        male_bm_fname = '../../../../../gs/bs/tga-openv/edwarde/body_utils/body_models/smplh/male/model.npz'
+        female_bm_fname = '../../../../../gs/bs/tga-openv/edwarde/body_utils/body_models/smplh/male/model.npz'
+
+        logging.info("Loading SMPL-H BodyModel...")
+        self.male_body_model = BodyModel(
+            bm_path=male_bm_fname,
+            model_type="smplh",
+            num_betas=16,
+            batch_size=1
+        )
+
+
+        self.female_body_model = BodyModel(
+            bm_path=female_bm_fname,
+            model_type="smplh",
+            num_betas=16,
+            batch_size=1
+        )
 
 
 
+        logging.info("SMPL-H BodyModel loaded successfully.")
 
         self.body_part_groups = {
             'head_and_neck': [2819, 3076, 1795, 2311, 1043, 919, 8985, 1696, 1703, 9002, 8757, 2383, 2898, 3035, 2148, 9066, 8947, 2041, 2813],
@@ -64,8 +89,7 @@ class FrameLoader(data.Dataset):
         self.apply_masking = apply_masking
         self.masking_ratio = masking_ratio
 
-        self.j_regressor = np.load(regressor_path)
-        print(f"[INFO] Loaded J_regressor with shape {self.j_regressor.shape}")
+        self.j_regressor = torch.tensor(np.load(regressor_path), dtype=torch.float32)
 
     def _build_index(self, dataset_list=None):
         """
@@ -110,56 +134,40 @@ class FrameLoader(data.Dataset):
 
     def collate_fn(self, batch):
         """
-        Custom collate function to process a batch of frames.
+        Custom collate function for DataLoader.
+        Returns:
+            dict: Contains processed markers and joints for each batch.
         """
         frames = [sample['frame'] for sample in batch]
         genders = [sample['gender'] for sample in batch]
 
-        # Process frames to extract markers, part labels, and joints
-        markers, part_labels, joints = self.batch_process_frames(frames, genders)
+        markers, joints = self.batch_process_frames(frames, genders)
 
-        # Generate and apply mask if masking is enabled
-        if self.apply_masking:
-            # Create a mask with the same shape as markers: [batch_size, n_markers]
-            mask = torch.rand(markers.shape[:2]) < self.masking_ratio  # True where markers are masked
-            mask = mask.to(markers.device)
-
-            # Apply the mask to markers (e.g., set masked markers to zero)
-            markers_masked = markers.clone()
-            markers_masked[mask] = 0.0  # Or any placeholder value
-        else:
-            markers_masked = markers
-            mask = torch.zeros_like(markers[:, :, 0], dtype=torch.bool)  # No masking applied
-
-        # Convert joints to NumPy if needed for downstream processing
-        if isinstance(joints, torch.Tensor):
-            joints_np = joints.cpu().numpy()
-        else:
-            joints_np = joints  # If already NumPy, no conversion needed
-
-        # Return processed batch
         return {
-            'markers': markers_masked,      # Masked markers (input to the model)
-            'original_markers': markers,   # Original unmasked markers (ground truth for loss computation)
-            'part_labels': part_labels,    # [batch_size, n_markers]
-            'mask': mask,                  # [batch_size, n_markers], boolean mask
-            'joints': joints_np            # Joints (NumPy format for downstream use)
+            'original_markers': markers,  # For alignment with the training script
+            'joints': joints,             # Joints as input to the model
         }
 
 
 
     def batch_process_frames(self, frames, genders):
         """
-        Processes a batch of frames and extracts markers and part labels.
-        
+        Processes a batch of frames to extract markers from SMPL-X and joints from SMPL-H models.
+
         Args:
             frames (list): List of frame dictionaries containing pose data.
             genders (list): List of genders ('male' or 'female') for each frame.
 
         Returns:
             torch.Tensor: Processed markers [batch_size, n_markers, 3].
-            torch.Tensor: Part labels [batch_size, n_markers].
+            torch.Tensor: Processed joints [batch_size, n_joints, 3].
         """
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.smplx_model_male = self.smplx_model_male.to(device)
+        self.smplx_model_female = self.smplx_model_female.to(device)
+        self.male_body_model = self.male_body_model.to(device)
+        self.female_body_model = self.female_body_model.to(device)
+        self.j_regressor = self.j_regressor.to(device)
         # Filter valid frames
         valid_frames = []
         valid_genders = []
@@ -179,9 +187,9 @@ class FrameLoader(data.Dataset):
         # Extract parameters from valid frames
         poses = np.array([frame['poses'] for frame in valid_frames])
         transl = np.array([frame['trans'] for frame in valid_frames])
-        betas = np.array([frame['betas'][:10] for frame in valid_frames])
+        betas = np.array([frame['betas'][:10] for frame in valid_frames])  # Truncate betas for SMPL-X
 
-        # Extract pose components and handle missing parameters
+        # Extract pose components
         global_orient = poses[:, :3]
         body_pose = poses[:, 3:66]
         left_hand_pose = poses[:, 66:111]
@@ -191,9 +199,8 @@ class FrameLoader(data.Dataset):
         reye_pose = poses[:, 162:165] if poses.shape[1] >= 165 else np.zeros((poses.shape[0], 3))
         expression = np.zeros((poses.shape[0], 10), dtype=np.float32)  # [batch_size, 10]
 
-
-        # Prepare body parameters for the SMPL-X model
-        body_params = {
+        # Prepare body parameters for SMPL-X
+        body_params_smplx = {
             'transl': torch.tensor(transl, device=device, dtype=torch.float32),
             'global_orient': torch.tensor(global_orient, device=device, dtype=torch.float32),
             'body_pose': torch.tensor(body_pose, device=device, dtype=torch.float32),
@@ -203,78 +210,68 @@ class FrameLoader(data.Dataset):
             'leye_pose': torch.tensor(leye_pose, device=device, dtype=torch.float32),
             'reye_pose': torch.tensor(reye_pose, device=device, dtype=torch.float32),
             'betas': torch.tensor(betas, device=device, dtype=torch.float32),
-            'expression': torch.tensor(expression, device=device, dtype=torch.float32)  # Add expression
+            'expression': torch.tensor(expression, device=device, dtype=torch.float32)
         }
 
         # Separate indices by gender
         male_indices = [i for i, g in enumerate(valid_genders) if g == 'male']
         female_indices = [i for i, g in enumerate(valid_genders) if g == 'female']
 
+        # Initialize lists for markers and joints
         markers_list = [None] * batch_size
-        joints_list = [None] * batch_size  # Initialize joints list
+        joints_list = [None] * batch_size
 
-        # Process male frames
-        if male_indices:
-            male_params = {k: v[male_indices] for k, v in body_params.items()}
+        # Process SMPL-X for markers
+        for indices, smplx_model in [(male_indices, self.smplx_model_male), (female_indices, self.smplx_model_female)]:
+            if indices:
+                smplx_params = {k: v[indices] for k, v in body_params_smplx.items()}
+                with torch.no_grad():
+                    smplx_output = smplx_model(return_verts=True, **smplx_params)
+                markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_gender, n_markers, 3]
+                for idx, orig_idx in enumerate(indices):
+                    markers_list[orig_idx] = markers[idx]
+
+        # Process SMPL-H for joints
+        for i, (frame, gender) in enumerate(zip(valid_frames, valid_genders)):
+            body_model = self.male_body_model if gender == 'male' else self.female_body_model
+            body_params_smplh = {
+                'root_orient': torch.tensor(frame['poses'][:3], dtype=torch.float32).unsqueeze(0).to(device),
+                'pose_body': torch.tensor(frame['poses'][3:66], dtype=torch.float32).unsqueeze(0).to(device),
+                'pose_hand': torch.tensor(frame['poses'][66:156], dtype=torch.float32).unsqueeze(0).to(device),
+                'trans': torch.tensor(frame['trans'], dtype=torch.float32).unsqueeze(0).to(device),
+                'betas': torch.tensor(frame['betas'][:16], dtype=torch.float32).unsqueeze(0).to(device)
+            }
             with torch.no_grad():
-                smplx_output = self.smplx_model_male(return_verts=True, **male_params)
-            male_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_male, n_markers, 3]
-            male_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
+                body_output_h = body_model(**body_params_smplh)
+                vertices_h = body_output_h.v[0]
+                joints_h = torch.matmul(self.j_regressor, vertices_h)  # Map to joints
+            joints_list[i] = joints_h
 
-            for idx, m_idx in enumerate(male_indices):
-                markers_list[m_idx] = male_markers[idx]
-                joints_list[m_idx] = male_joints[idx]
-
-        # Process female frames
-        if female_indices:
-            female_params = {k: v[female_indices] for k, v in body_params.items()}
-            with torch.no_grad():
-                smplx_output = self.smplx_model_female(return_verts=True, **female_params)
-            female_markers = smplx_output.vertices[:, self.marker_indices, :]  # [batch_size_female, n_markers, 3]
-            female_joints = smplx_output.joints[:, :25, :]  # First 25 joints for the body
-
-            for idx, f_idx in enumerate(female_indices):
-                markers_list[f_idx] = female_markers[idx]
-                joints_list[f_idx] = female_joints[idx]
-
-        # Stack joints in the original order
-        joints = torch.stack(joints_list, dim=0)  # [batch_size, 25, 3]
-
-        # Stack markers in the original order
+        # Stack results in the original order
         markers = torch.stack(markers_list, dim=0)  # [batch_size, n_markers, 3]
+        joints = torch.stack(joints_list, dim=0)  # [batch_size, n_joints, 3]
 
-        # Normalize markers if required
+        # Normalize if required
         if self.normalize:
-            # Compute the mean of the markers for each batch
-            markers_mean = markers.mean(dim=1, keepdim=True)  # Shape: [batch_size, 1, 3]
-            
-            # Normalize markers by subtracting their mean
+            markers_mean = markers.mean(dim=1, keepdim=True)
+            joints_mean = joints.mean(dim=1, keepdim=True)
             markers -= markers_mean
+            joints -= joints_mean
 
-            # Normalize joints by subtracting the same mean
-            joints -= markers_mean  # Apply the same mean to align joints with markers
-
-
-        # Expand part labels to match batch size
-        part_labels = self.part_labels.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_markers]
-
-        return markers, part_labels, joints
-
-
+        logging.info(f"Processed batch with markers shape {markers.shape} and joints shape {joints.shape}")
+        return markers, joints
 
     def _get_marker_indices(self, markers_type):
         """
         Get marker indices based on the configuration.
-
         Args:
             markers_type (str): Marker configuration (e.g., 'f0_p0').
-
         Returns:
             list: List of marker indices.
         """
         f, p = markers_type.split('_')
         finger_n, palm_n = int(f[1:]), int(p[1:])
-        with open('./body_utils/smplx_markerset.json') as f:
+        with open('../../../../../gs/bs/tga-openv/edwarde/body_utils/smplx_markerset.json') as f:
             markerset = json.load(f)['markersets']
             marker_indices = []
             for marker in markerset:
@@ -295,10 +292,8 @@ class FrameLoader(data.Dataset):
     def _map_marker_to_part(self, marker_indices):
         """
         Map each marker to a specific body part.
-
         Args:
             marker_indices (list): List of marker indices.
-
         Returns:
             numpy.ndarray: Array of part labels for each marker.
         """
@@ -321,9 +316,9 @@ class FrameLoader(data.Dataset):
         # Load only the required frame from the file
         data = np.load(npz_file)
         frame = {
-            'trans': data['trans'][frame_idx],
-            'poses': data['poses'][frame_idx],
-            'betas': data['betas']
+            'trans': data['trans'][frame_idx].astype(np.float32),
+            'poses': data['poses'][frame_idx].astype(np.float32),
+            'betas': data['betas'].astype(np.float32)
         }
         gender = sample['gender']
 
@@ -339,4 +334,3 @@ class FrameLoader(data.Dataset):
             'frame': frame,
             'gender': gender
         }
-
