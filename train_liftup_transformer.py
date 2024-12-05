@@ -170,23 +170,47 @@ def main(exp_name):
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
 
+    start_epoch = 0  # Initialize start_epoch
+
+    # Load checkpoint if provided
+    if args.checkpoint_path and os.path.isfile(args.checkpoint_path):
+        logger.info(f"Loading checkpoint '{args.checkpoint_path}'")
+        checkpoint = torch.load(args.checkpoint_path, map_location=DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        logger.info(f"Resumed from checkpoint '{args.checkpoint_path}' at epoch {start_epoch} with best validation loss {best_val_loss:.8f}")
+    else:
+        logger.info("No checkpoint found. Starting training from scratch.")
+        best_val_loss = float('inf')
+
     # Training Loop
     best_val_loss = float('inf')
-    for epoch in range(NUM_EPOCHS):
+# Training Loop
+    for epoch in range(start_epoch, NUM_EPOCHS):
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
         train_loss = train(model, train_loader, optimizer, epoch, logger, DEVICE)
         scheduler.step()
 
         # Validation
         if (epoch + 1) % 2 == 0:
-            val_loss = validate(model, val_loader, epoch, logger)
+            val_loss = validate(model, val_loader, logger, DEVICE)
             wandb.log({"epoch": epoch + 1, "training_loss": train_loss, "validation_loss": val_loss})
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 checkpoint_path = os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth")
-                torch.save(model.state_dict(), checkpoint_path)
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                }, checkpoint_path)
                 logger.info(f"Saved Best Model to {checkpoint_path}")
+
 
     wandb.finish()
 
@@ -195,5 +219,6 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     parser = argparse.ArgumentParser(description="LiftUp Transformer Training Script")
     parser.add_argument("--exp_name", required=True, help="Name of the experiment for logging and saving checkpoints")
+    parser.add_argument("--checkpoint_path", default=None, help="Path to the checkpoint to resume training")
     args = parser.parse_args()
     main(args.exp_name)
