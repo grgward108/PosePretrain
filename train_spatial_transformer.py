@@ -19,11 +19,10 @@ from torch.amp import autocast
 import time
 
 # Hyperparameters
-BATCH_SIZE = 256
+BATCH_SIZE = 64
 LEARNING_RATE = 0.001
-
-NUM_EPOCHS = 50
-EMBED_DIM = 64
+NUM_EPOCHS = 100
+EMBED_DIM = 128
 NUM_HEADS = 4
 NUM_LAYERS = 6
 N_PARTS = 9  # Number of body parts
@@ -223,21 +222,21 @@ def main(exp_name, args):
                 \t- Masking Ratio: {MASKING_RATIO}
                 \t- Device: {DEVICE}""")
 
-    wandb.init(entity='edward-effendy-tokyo-tech696', project='PoseTrain_Spatial', name=exp_name)
-
-    # Update WandB config
-    wandb.config.update({
-        "experiment": exp_name,
-        "batch_size": BATCH_SIZE,
-        "learning_rate": LEARNING_RATE,
-        "num_epochs": NUM_EPOCHS,
-        "embed_dim": EMBED_DIM,
-        "num_heads": NUM_HEADS,
-        "num_layers": NUM_LAYERS,
-        "n_parts": N_PARTS,
-        "n_markers": N_MARKERS,
-        "masking_ratio": MASKING_RATIO,
-    })
+    if dist.get_rank() == 0:  # Only rank 0 initializes WandB
+        wandb.init(entity='edward-effendy-tokyo-tech696', project='PoseTrain_Spatial', name=exp_name)
+        # Update WandB config
+        wandb.config.update({
+            "experiment": exp_name,
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "num_epochs": NUM_EPOCHS,
+            "embed_dim": EMBED_DIM,
+            "num_heads": NUM_HEADS,
+            "num_layers": NUM_LAYERS,
+            "n_parts": N_PARTS,
+            "n_markers": N_MARKERS,
+            "masking_ratio": MASKING_RATIO,
+        })
     
 
     # Initialize Dataset and Dataloader
