@@ -22,7 +22,18 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 
 # Validation frequency
-VALIDATE_EVERY = 10
+VALIDATE_EVERY = 5
+
+def count_learnable_parameters(model):
+    """
+    Count the number of learnable parameters in a model.
+    Args:
+        model: The PyTorch model.
+    Returns:
+        Total number of learnable parameters.
+    """
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 
 def validate(model, criterion, val_loader, mask_ratio, device):
@@ -128,7 +139,7 @@ if __name__ == "__main__":
     exp_name = args.exp_name
 
     # Create checkpoint and log directories
-    checkpoint_dir = os.path.join('logs', 'TemporalTransformer', exp_name)
+    checkpoint_dir = os.path.join('temporal_log', exp_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     # Configure logging
@@ -184,6 +195,10 @@ if __name__ == "__main__":
         num_joints=train_dataset[0][0].shape[1],  # Number of joints/markers
         maxlen=CLIP_SECONDS * CLIP_FPS + 1,
     ).to(DEVICE)
+
+    # Print the number of learnable parameters
+    num_params = count_learnable_parameters(model)
+    logger.info(f"Number of learnable parameters in TemporalTransformer: {num_params:,}")
 
     # Loss and Optimizer
     criterion = nn.MSELoss()
