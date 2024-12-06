@@ -10,6 +10,7 @@ import argparse
 import logging
 import torch.multiprocessing as mp
 import time
+import numpy as np
 
 from LiftUpTransformer.models.models import LiftUpTransformer
 from LiftUpTransformer.data.dataloader import FrameLoader
@@ -93,13 +94,35 @@ def train(model, dataloader, optimizer, epoch, logger, DEVICE):
     return avg_loss
 
 
-def validate(model, dataloader, logger, DEVICE):
+def save_reconstruction_npz(joints, reconstructed_markers, original_markers, save_dir, epoch):
+    """
+    Save reconstruction data for visualization in an .npz file.
+    Args:
+        joints (torch.Tensor): input of joints [batch_size,joint_numbers , 3].
+        reconstructed_markers (torch.Tensor): Reconstructed markers [batch_size, n_markers, 3].
+        original_markers (torch.Tensor): Ground truth markers [batch_size, n_markers, 3].
+
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Convert to numpy
+    joints = joints.cpu().numpy()
+    reconstructed = reconstructed_markers.cpu().numpy()
+    ground_truth = original_markers.cpu().numpy()
+
+    # Save to .npz file
+    npz_path = os.path.join(save_dir, f"epoch_{epoch}_liftup_reconstruction.npz")
+    np.savez_compressed(npz_path, joints=joints, reconstructed=reconstructed, ground_truth=ground_truth)
+    print(f"Saved reconstruction data to {npz_path}")
+
+
+def validate(model, dataloader, epoch, logger, DEVICE):
     model.eval()
     epoch_loss = 0.0
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(dataloader, desc="Validation")):
-            joints = torch.tensor(batch['joints'], dtype=torch.float32, device=DEVICE)
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Validation")):
+            joints = torch.from_numpy(batch['joints']).to(DEVICE, dtype=torch.float32)
 
             original_markers = batch['original_markers'].clone().detach().to(DEVICE, dtype=torch.float32)
 
@@ -109,6 +132,9 @@ def validate(model, dataloader, logger, DEVICE):
             loss = criterion(reconstructed_markers, original_markers)
 
             epoch_loss += loss.item()
+
+            if batch_idx == 0:
+                save_reconstruction_npz(joints, reconstructed_markers, original_markers, 'liftup_log', epoch)
 
     avg_loss = epoch_loss / len(dataloader)
     logger.info(f"Validation Loss: {avg_loss:.8f}")
@@ -186,9 +212,8 @@ def main(exp_name):
         logger.info("No checkpoint found. Starting training from scratch.")
         best_val_loss = float('inf')
 
+
     # Training Loop
-    best_val_loss = float('inf')
-# Training Loop
     for epoch in range(start_epoch, NUM_EPOCHS):
         logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
         train_loss = train(model, train_loader, optimizer, epoch, logger, DEVICE)
@@ -196,7 +221,7 @@ def main(exp_name):
 
         # Validation
         if (epoch + 1) % 2 == 0:
-            val_loss = validate(model, val_loader, logger, DEVICE)
+            val_loss = validate(model, val_loader, epoch, logger, DEVICE)
             wandb.log({"epoch": epoch + 1, "training_loss": train_loss, "validation_loss": val_loss})
 
             if val_loss < best_val_loss:
