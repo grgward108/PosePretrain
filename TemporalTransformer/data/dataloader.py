@@ -91,18 +91,15 @@ class MotionLoader(data.Dataset):
 
         return clip_img, mask
 
-
-
-    def divide_clip(self, dataset_name='HumanEva', amass_dir=None):
-        npz_fnames = sorted(glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz')))  # name list of all npz sequence files in current dataset
+    def divide_clip(self, dataset_name='HumanEva', amass_dir=None, stride=None):
+        npz_fnames = sorted(glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz')))  # List of all npz sequence files
         fps_list = []
-        # print('sequence #: ', len(npz_fnames))
         cnt_sub_clip = 0
-        # print('reading sequences in %s...' % (dataset_name))
+
         for npz_fname in npz_fnames:
             cdata = np.load(npz_fname)
 
-            fps = int(cdata['mocap_framerate'])  # check fps of current sequence
+            fps = int(cdata['mocap_framerate'])  # Check FPS of current sequence
             fps_list.append(fps)
             if fps == 150:
                 sample_rate = 5
@@ -112,43 +109,40 @@ class MotionLoader(data.Dataset):
                 sample_rate = 2
             else:
                 continue
-            # clip_seconds*30 + 2 more frames (122 after sample, then become 121)
-            clip_len = self.clip_seconds*fps + sample_rate + 1 
 
-            N = len(cdata['poses'])  # total frame number of the current sequence
+            # Calculate clip length and stride
+            clip_len = self.clip_seconds * fps + sample_rate + 1
+            stride = stride or clip_len  # Default stride is no overlap
+
+            N = len(cdata['poses'])  # Total frame number of the current sequence
             if N >= clip_len:
-                num_valid_clip = int(N/clip_len)
-                seq_trans = cdata['trans']
-                seq_poses = cdata['poses']
-                seq_dmpls = cdata['dmpls']
-                seq_betas = cdata['betas']
-                seq_gender = str(cdata['gender'])
-                seq_fps = int(cdata['mocap_framerate'])
-
-                for i in range(num_valid_clip):
-                    # pose: 156-d (3 global rotation + 63 body pose + 45 left hand pose + 45 right hand pose)
-                    # dmpls: 8-d, trans: 3-d, betas: 16-d
-                    # todo: augmentation: 1/2 frames overlap
-                    data_dict = {}
-                    data_dict['trans'] = seq_trans[(clip_len * i):clip_len * (i + 1)][::sample_rate, ]  # [T, 3]
-                    data_dict['poses'] = seq_poses[(clip_len * i):clip_len * (i + 1)][::sample_rate, ]  # [T, 156]
-                    data_dict['betas'] = seq_betas  # [10]
-                    data_dict['gender'] = seq_gender  # male/female
-                    data_dict['mocap_framerate'] = seq_fps
+                for start_idx in range(0, N - clip_len + 1, stride):
+                    # Extract subclip data
+                    data_dict = {
+                        'trans': cdata['trans'][start_idx:start_idx + clip_len:sample_rate],  # [T, 3]
+                        'poses': cdata['poses'][start_idx:start_idx + clip_len:sample_rate],  # [T, 156]
+                        'betas': cdata['betas'],  # [10]
+                        'gender': str(cdata['gender']),  # male/female
+                        'mocap_framerate': fps,
+                    }
                     self.data_dict_list.append(data_dict)
                     cnt_sub_clip += 1
             else:
                 continue
 
-        # print('get {} sub clips from dataset {}'.format(cnt_sub_clip, dataset_name))
+        print(f'Generated {cnt_sub_clip} subclips from dataset {dataset_name}.')
+
+
+        print('get {} sub clips from dataset {}'.format(cnt_sub_clip, dataset_name))
         # print('fps range:', min(fps_list), max(fps_list), '\n')
 
 
-    def read_data(self, amass_datasets, amass_dir):
+    def read_data(self, amass_datasets, amass_dir, stride=None):
         for dataset_name in tqdm(amass_datasets):
-            self.divide_clip(dataset_name, amass_dir)
+            self.divide_clip(dataset_name, amass_dir, stride)
         self.n_samples = len(self.data_dict_list)
-        print('[INFO] get {} sub clips in total.'.format(self.n_samples))
+        print(f'[INFO] Generated {self.n_samples} subclips in total.')
+
 
 
     def create_body_repr(self, with_hand=False, global_rot_norm=True, 
@@ -167,7 +161,6 @@ class MotionLoader(data.Dataset):
                                           create_left_hand_pose=True, create_right_hand_pose=True, create_expression=True,
                                           create_jaw_pose=True, create_leye_pose=True, create_reye_pose=True, create_transl=True,
                                           batch_size=self.clip_len).to(device)
-
         self.clip_img_list = []
         for i in tqdm(range(self.n_samples)):
             ####################### set smplx params (gpu tensor) for each motion clip ##################
@@ -203,6 +196,7 @@ class MotionLoader(data.Dataset):
 
                 if self.mode in ['global_markers', 'local_markers', 'local_markers_3dv', 'local_markers_3dv_4chan']:
                     markers = smplx_output.vertices[:, self.markers_ids, :]
+
 
                 if global_rot_norm:
                     ##### transfrom to pelvis at origin, face y axis
@@ -359,6 +353,8 @@ class MotionLoader(data.Dataset):
             self.clip_img_list.append(cur_body)
 
 
+
+
         self.clip_img_list = np.asarray(self.clip_img_list)  # [N, T-1, d] / [N, 4, T-1, d]
 
         if self.normalize:
@@ -390,13 +386,14 @@ class MotionLoader(data.Dataset):
         if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
             original_clip = torch.from_numpy(self.clip_img_list[index]).float()  # [T, num_markers, 3]
             masked_clip = original_clip.clone()  # Make a copy for masking
+ 
 
             if self.mask_ratio > 0.0:
                 masked_clip, mask = self.apply_masking(masked_clip)  # Apply masking
             else:
                 mask = torch.ones(original_clip.shape[0], dtype=torch.float32)  # All frames visible
 
-            return masked_clip, mask, original_clip
+            return masked_clip, mask, original_clip, trans
 
         elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
             clip_img = self.clip_img_list[index]  # [4, T, d]
