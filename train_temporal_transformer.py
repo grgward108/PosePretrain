@@ -8,6 +8,7 @@ from TemporalTransformer.models.models import TemporalTransformer
 from TemporalTransformer.data.dataloader import MotionLoader
 import argparse
 import logging
+import numpy as np
 
 # Hyperparameters
 BATCH_SIZE = 32
@@ -20,9 +21,35 @@ CLIP_FPS = 30
 MARKERS_TYPE = 'f15_p5'
 MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
+STRIDE = 30
 
 # Validation frequency
-VALIDATE_EVERY = 5
+VALIDATE_EVERY = 2
+
+def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
+    """
+    Save reconstruction data for visualization in an .npz file.
+    Args:
+        markers (torch.Tensor): Masked input markers [batch_size, n_markers, 3].
+        reconstructed_markers (torch.Tensor): Reconstructed markers [batch_size, n_markers, 3].
+        original_markers (torch.Tensor): Ground truth markers [batch_size, n_markers, 3].
+        mask (torch.Tensor): Mask tensor [batch_size, n_markers].
+        save_dir (str): Directory to save the results.
+        epoch (int): Current epoch number.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Convert to numpy
+    masked = markers.cpu().numpy()
+    reconstructed = reconstructed_markers.cpu().numpy()
+    ground_truth = original_markers.cpu().numpy()
+    mask_np = mask.cpu().numpy()
+
+    # Save to .npz file
+    npz_path = os.path.join(save_dir, f"epoch_{epoch}_reconstruction.npz")
+    np.savez_compressed(npz_path, masked=masked, reconstructed=reconstructed, ground_truth=ground_truth, mask=mask_np)
+    print(f"Saved reconstruction data to {npz_path}")
+
 
 def count_learnable_parameters(model):
     """
@@ -36,12 +63,11 @@ def count_learnable_parameters(model):
 
 
 
-def validate(model, criterion, val_loader, mask_ratio, device):
+def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, save_dir=None, epoch=None):
     """
     Validate the model on the validation dataset with the same masking logic as training.
     Args:
         model: The model to validate.
-        criterion: Loss function.
         val_loader: DataLoader for the validation dataset.
         mask_ratio: Ratio of markers to mask for validation.
         device: The device to run the validation on.
@@ -50,41 +76,52 @@ def validate(model, criterion, val_loader, mask_ratio, device):
     """
     model.eval()
     val_loss = 0.0
+    first_batch_saved = False
+    i = 0
+
     with torch.no_grad():
         for masked_clip, mask, original_clip in tqdm(val_loader, desc="Validating"):
             masked_clip = masked_clip.to(device)
+            mask = mask.to(device)
             original_clip = original_clip.to(device)
-
-            # Dynamically create a mask (same logic as training)
-            mask = (torch.rand(masked_clip.shape[:-1], device=device) < mask_ratio).float()
-            mask = mask.unsqueeze(-1).expand_as(masked_clip)  # Match shape to [B, T, J, C]
-            masked_clip[mask.bool()] = 0.0  # Zero out masked markers
 
             # Forward pass
             outputs = model(masked_clip)
 
-            # Compute loss only on masked parts
-            loss = criterion(outputs[mask.bool()], original_clip[mask.bool()])
-            val_loss += loss.item()
+            # Expand mask dimensions to match outputs and ground truth
+            mask = mask.unsqueeze(-1).unsqueeze(-1)
+
+            # Apply the mask
+            masked_outputs = outputs * mask
+            masked_original = original_clip * mask
+
+            # Compute the mean squared error loss only on the masked elements
+            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
+            raw_loss = masked_loss.sum()  # Total loss across all masked elements
+            normalized_loss = raw_loss / mask.sum()  # Normalize by the number of masked elements
+
+            val_loss += normalized_loss.item()
+
+            # Save first batch reconstruction if required
+            if save_reconstruction and not first_batch_saved:
+                if save_dir is not None and epoch is not None and i == 6:  # Save for the first batch
+                    save_reconstruction_npz(
+                        markers=masked_clip,
+                        reconstructed_markers=outputs,
+                        original_markers=original_clip,
+                        mask=mask.squeeze(-1).squeeze(-1),  # Original mask shape for saving
+                        save_dir=save_dir,
+                        epoch=epoch
+                    )
+                    first_batch_saved = True
+
+            i += 1
 
     avg_val_loss = val_loss / len(val_loader)
     return avg_val_loss
 
 
-
-
-def train(model, optimizer, criterion, train_loader, val_loader, logger, checkpoint_dir):
-    """
-    Train the model and validate periodically.
-    Args:
-        model: The TemporalTransformer model.
-        optimizer: Optimizer for the model.
-        criterion: Loss function.
-        train_loader: DataLoader for the training dataset.
-        val_loader: DataLoader for the validation dataset.
-        logger: Logger for recording training and validation logs.
-        checkpoint_dir: Directory to save model checkpoints.
-    """
+def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
     model.train()
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
@@ -97,17 +134,26 @@ def train(model, optimizer, criterion, train_loader, val_loader, logger, checkpo
             # Forward pass
             outputs = model(masked_clip)
 
-            # Masking to compute loss only on masked frames
-            mask = mask.unsqueeze(-1).unsqueeze(-1).expand_as(outputs).to(DEVICE)
-            loss = criterion(outputs[mask.bool()], original_clip[mask.bool()])
+            # Expand mask dimensions
+            mask = mask.to(outputs.device).unsqueeze(-1).unsqueeze(-1)
+
+            # Apply mask
+            masked_outputs = outputs * mask
+            masked_original = original_clip * mask
+
+            # Compute masked loss and normalize
+            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
+            raw_loss = masked_loss.sum()  # Total loss
+            normalized_loss = raw_loss / mask.sum()  # Normalize by the number of masked elements
+            
 
             # Backward pass and optimization
             optimizer.zero_grad()
-            loss.backward()
+            normalized_loss.backward()
             optimizer.step()
 
-            epoch_loss += loss.item()
-            progress_bar.set_postfix({"Loss": loss.item()})
+            epoch_loss += normalized_loss.item()
+            progress_bar.set_postfix({"Loss": normalized_loss.item()})
 
         # Log average training loss for the epoch
         avg_epoch_loss = epoch_loss / len(train_loader)
@@ -126,8 +172,18 @@ def train(model, optimizer, criterion, train_loader, val_loader, logger, checkpo
 
         # Validate every VALIDATE_EVERY epochs
         if (epoch + 1) % VALIDATE_EVERY == 0:
-            val_loss = validate(model, criterion, val_loader, MASK_RATIO, DEVICE)
+            save_dir = os.path.join(checkpoint_dir, "reconstruction_val")
+            val_loss = validate(
+                model,
+                val_loader=val_loader,
+                mask_ratio=MASK_RATIO,
+                device=DEVICE,
+                save_reconstruction=True,  # Enable saving reconstruction
+                save_dir=save_dir,
+                epoch=epoch + 1
+            )
             logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Validation Loss: {val_loss:.4f}")
+
 
 
 
@@ -155,6 +211,8 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger()
 
+    log_dir = os.path.join('./temporal_log', exp_name)
+
     # Dataset and DataLoader
     train_dataset = MotionLoader(
         clip_seconds=CLIP_SECONDS,
@@ -164,9 +222,9 @@ if __name__ == "__main__":
         markers_type=MARKERS_TYPE,
         mode=MODE,
         mask_ratio=MASK_RATIO,
-        log_dir='./logs',
+        log_dir=log_dir,
     )
-    train_dataset.read_data(['HumanEva', 'ACCAD', 'CMU','DanceDB', 'Eyes_Japan_Dataset', 'GRAB'], amass_dir='../../../data/edwarde/dataset/AMASS')
+    train_dataset.read_data(['HumanEva', 'ACCAD', 'CMU','DanceDB', 'Eyes_Japan_Dataset', 'GRAB'], amass_dir='../../../data/edwarde/dataset/AMASS', stride=STRIDE)
     train_dataset.create_body_repr(smplx_model_path=SMPLX_MODEL_PATH)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
 
@@ -178,7 +236,7 @@ if __name__ == "__main__":
         markers_type=MARKERS_TYPE,
         mode=MODE,
         mask_ratio=MASK_RATIO,  # Apply the same masking ratio as training
-        log_dir='./logs',
+        log_dir=log_dir,
     )
 
     val_dataset.read_data(['HUMAN4D', 'KIT'], amass_dir='../../../data/edwarde/dataset/AMASS')
@@ -205,4 +263,4 @@ if __name__ == "__main__":
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
     # Start training
-    train(model, optimizer, criterion, train_loader, val_loader, logger, checkpoint_dir)
+    train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir)
