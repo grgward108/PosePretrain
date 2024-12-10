@@ -15,23 +15,25 @@ import logging
 import time
 import random
 import numpy as np
+import torch.multiprocessing as mp
 
-from LiftUpTransformer.models.models import LiftUpTransformer  
-from LiftUpTransformer.data.dataloader import FrameLoader 
-from LiftUpTransformer.data.preprocessed_data import PreprocessedDataset 
+from LiftUpTransformer.models.models import LiftUpTransformer
+from LiftUpTransformer.data.dataloader_singular import FrameLoader
 
 # Hyperparameters
-BATCH_SIZE = 128  # Per GPU batch size
+BATCH_SIZE = 256
 LEARNING_RATE = 0.001
 NUM_EPOCHS = 100
 EMBED_DIM = 64
 NUM_HEADS = 4
 NUM_LAYERS = 6
-NUM_JOINTS = 17   # Number of input joints
-NUM_MARKERS = 143 # Number of output markers
+NUM_JOINTS = 25  # Number of input joints
+NUM_MARKERS = 143  # Number of output markers
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Paths and Dataset Parameters
-DATASET_DIR = '../../../../gs/bs/tga-openv/edwarde/AMASS/preprocessed'
+DATASET_DIR = '../../../../gs/bs/tga-openv/edwarde/AMASS'
+SMPLX_MODEL_PATH = '../../../../gs/bs/tga-openv/edwarde/body_utils/body_models'
 MARKERS_TYPE = 'f15_p22'
 NORMALIZE = True
 
@@ -41,7 +43,8 @@ VAL_DATASET = ['HUMAN4D', 'KIT']
 # Define Loss Function
 criterion = nn.MSELoss()
 
-def setup_logger(exp_name, save_dir, rank=0):
+
+def setup_logger(exp_name, save_dir):
     """Setup logger to write logs to both console and a file."""
     log_file = os.path.join(save_dir, f"{exp_name}.log")
     logger = logging.getLogger()
@@ -66,136 +69,123 @@ def setup_logger(exp_name, save_dir, rank=0):
 
     return logger
 
-def train(model, dataloader, optimizer, epoch, scaler, logger, device):
+
+def train(model, dataloader, optimizer, epoch, logger, DEVICE):
     model.train()
     epoch_loss = 0.0
     start_time = time.time()
 
-    for i, batch in enumerate(tqdm(dataloader, desc=f"Training Epoch {epoch + 1}", disable=(dist.get_rank() != 0))):
-        # Data preparation
-        joints = batch['joints'].to(device, non_blocking=True)  
-        original_markers = batch['original_markers'].to(device, non_blocking=True)  
+    for i, batch in enumerate(tqdm(dataloader, desc=f"Training Epoch {epoch + 1}")):
+        # Convert NumPy arrays to PyTorch tensors
+        joints = torch.tensor(batch['joints'], dtype=torch.float32, device=DEVICE)
+
+        original_markers = batch['original_markers'].clone().detach().to(DEVICE, dtype=torch.float32)
 
         optimizer.zero_grad()
 
-        with autocast():
+        # Forward pass
+        reconstructed_markers = model(joints)
+        # Loss computation
+        loss = criterion(reconstructed_markers, original_markers)
+
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    avg_loss = epoch_loss / len(dataloader)
+    logger.info(f"Epoch {epoch + 1} Training Loss: {avg_loss:.8f}")
+    return avg_loss
+
+
+def save_reconstruction_npz(joints, reconstructed_markers, original_markers, save_dir, epoch):
+    """
+    Save reconstruction data for visualization in an .npz file.
+    Args:
+        joints (torch.Tensor): input of joints [batch_size,joint_numbers , 3].
+        reconstructed_markers (torch.Tensor): Reconstructed markers [batch_size, n_markers, 3].
+        original_markers (torch.Tensor): Ground truth markers [batch_size, n_markers, 3].
+
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Convert to numpy
+    joints = joints.cpu().numpy()
+    reconstructed = reconstructed_markers.cpu().numpy()
+    ground_truth = original_markers.cpu().numpy()
+
+    # Save to .npz file
+    npz_path = os.path.join(save_dir, f"epoch_{epoch}_liftup_reconstruction.npz")
+    np.savez_compressed(npz_path, joints=joints, reconstructed=reconstructed, ground_truth=ground_truth)
+    print(f"Saved reconstruction data to {npz_path}")
+
+
+def validate(model, dataloader, epoch, logger, DEVICE):
+    model.eval()
+    epoch_loss = 0.0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Validation")):
+            joints = torch.from_numpy(batch['joints']).to(DEVICE, dtype=torch.float32)
+
+            original_markers = batch['original_markers'].clone().detach().to(DEVICE, dtype=torch.float32)
+
             # Forward pass
             reconstructed_markers = model(joints)
             # Loss computation
             loss = criterion(reconstructed_markers, original_markers)
 
-        # Backward pass with GradScaler
-        scaler.scale(loss).backward()
-
-        # Gradient Clipping
-        scaler.unscale_(optimizer)
-        max_norm = 1.0
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-
-        scaler.step(optimizer)
-        scaler.update()
-
-        # Accumulate loss
-        epoch_loss += loss.item()
-
-    # Synchronize and compute average loss across all processes
-    total_loss_tensor = torch.tensor(epoch_loss, device=device)
-    dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
-    avg_loss = total_loss_tensor.item() / dist.get_world_size() / len(dataloader)
-
-    if dist.get_rank() == 0:
-        logger.info(f"Epoch {epoch + 1} Training Loss: {avg_loss:.8f}")
-        logger.info(f"Epoch {epoch + 1} completed in {time.time() - start_time:.2f} seconds.")
-    return avg_loss
-
-def validate(model, dataloader, epoch, logger, device):
-    model.eval()
-    epoch_loss = 0.0
-    valid_batches = 0
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Validation Epoch {epoch + 1}")):
-            joints = batch['joints'].to(DEVICE, non_blocking=True)  # Shape: [batch_size, NUM_JOINTS, 3]
-            original_markers = batch['original_markers'].to(DEVICE, non_blocking=True)  # Shape: [batch_size, NUM_MARKERS, 3]
-
-            # Forward pass
-            reconstructed_markers = model(joints)
-
-            # Compute loss
-            loss = criterion(reconstructed_markers, original_markers)
             epoch_loss += loss.item()
-            valid_batches += 1
 
-        avg_loss = epoch_loss / valid_batches if valid_batches > 0 else 0.0
-    logger.info(f"Epoch {epoch + 1} Validation Loss: {avg_loss:.8f}")
+            if batch_idx == 0:
+                save_reconstruction_npz(joints, reconstructed_markers, original_markers, 'liftup_log', epoch)
+
+    avg_loss = epoch_loss / len(dataloader)
+    logger.info(f"Validation Loss: {avg_loss:.8f}")
     return avg_loss
-    
-def main():
-    parser = argparse.ArgumentParser(description="LiftUp Transformer Training Script")
-    parser.add_argument("--exp_name", required=True, help="Name of the experiment for logging and saving checkpoints")
-    parser.add_argument("--resume", default=None, help="Path to checkpoint to resume training")
-    parser.add_argument("--local_rank", type=int, default=0, help="Local rank for distributed training")
-    args = parser.parse_args()
 
-    # Initialize the process group
-    dist.init_process_group(backend='nccl', init_method='env://')
-    local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device(f'cuda:{local_rank}')
-    torch.cuda.set_device(device)
 
-    # Set random seeds for reproducibility
-    seed = 42 + dist.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.cuda.manual_seed_all(seed)
 
-    # Set up logger
-    SAVE_DIR = os.path.join('liftup_log', args.exp_name, 'ckpt')
-    if dist.get_rank() == 0:
-        os.makedirs(SAVE_DIR, exist_ok=True)
-    logger = setup_logger(args.exp_name, SAVE_DIR, rank=dist.get_rank())
+def main(exp_name):
+    SAVE_DIR = os.path.join('liftup_log', exp_name, 'ckpt')
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    logger = setup_logger(exp_name, SAVE_DIR)
 
-    if dist.get_rank() == 0:
-        logger.info(f"[INFO] Checkpoints will be saved to: {SAVE_DIR}")
-        logger.info(f"""[INFO] The configuration is as follows:
-                    \t- Batch Size: {BATCH_SIZE}
-                    \t- Learning Rate: {LEARNING_RATE}
-                    \t- Number of Epochs: {NUM_EPOCHS}
-                    \t- Embedding Dimension: {EMBED_DIM}
-                    \t- Number of Heads: {NUM_HEADS}
-                    \t- Number of Layers: {NUM_LAYERS}
-                    \t- Device: {device}""")
+    logger.info(f"[INFO] Checkpoints will be saved to: {SAVE_DIR}")
 
-    # Initialize wandb only on the main process
-    if dist.get_rank() == 0:
-        wandb.init(entity='edward-effendy-tokyo-tech696', project='PoseTrain_LiftUp', name=args.exp_name)
-    else:
-        os.environ['WANDB_MODE'] = 'offline'
+    wandb.init(entity='edward-effendy-tokyo-tech696', project='PoseTrain_LiftUp', name=exp_name)
+
 
     # Dataset and Dataloader
-    PREPROCESSED_TRAIN_DIR = '../../../../gs/bs/tga-openv/edwarde/AMASS/preprocessed'
-    PREPROCESSED_VAL_DIR = '../../../../gs/bs/tga-openv/edwarde/AMASS/preprocessed'
-
-    train_dataset = PreprocessedDataset(PREPROCESSED_TRAIN_DIR)
-    val_dataset = PreprocessedDataset(PREPROCESSED_VAL_DIR)
-
-    train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
+    train_dataset = FrameLoader(
+        dataset_dir=DATASET_DIR,
+        smplx_model_path=SMPLX_MODEL_PATH,
+        markers_type=MARKERS_TYPE,
+        normalize=NORMALIZE,
+        dataset_list=TRAIN_DATASET,
+    )
+    val_dataset = FrameLoader(
+        dataset_dir=DATASET_DIR,
+        smplx_model_path=SMPLX_MODEL_PATH,
+        markers_type=MARKERS_TYPE,
+        normalize=NORMALIZE,
+        dataset_list=VAL_DATASET,
+    )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        sampler=train_sampler,
+        shuffle=True,
+        collate_fn=train_dataset.collate_fn,
         num_workers=8,
-        pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
-        sampler=val_sampler,
+        shuffle=False,
+        collate_fn=val_dataset.collate_fn,
         num_workers=8,
-        pin_memory=True,
     )
 
     # Initialize Model and Optimizer
@@ -206,66 +196,59 @@ def main():
         num_markers=NUM_MARKERS,
         num_layers=NUM_LAYERS,
         num_heads=NUM_HEADS,
-    ).to(device)
-
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    ).to(DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
-    scaler = GradScaler()
 
-    # Resume from checkpoint if provided
-    if args.resume is not None:
-        checkpoint = torch.load(args.resume, map_location=device)
+    start_epoch = 0  # Initialize start_epoch
+
+    # Load checkpoint if provided
+    if args.checkpoint_path and os.path.isfile(args.checkpoint_path):
+        logger.info(f"Loading checkpoint '{args.checkpoint_path}'")
+        checkpoint = torch.load(args.checkpoint_path, map_location=DEVICE)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
         start_epoch = checkpoint['epoch']
-        logger.info(f"Resumed training from checkpoint: {args.resume}, starting from epoch {start_epoch}")
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        logger.info(f"Resumed from checkpoint '{args.checkpoint_path}' at epoch {start_epoch} with best validation loss {best_val_loss:.8f}")
     else:
-        start_epoch = 0
+        logger.info("No checkpoint found. Starting training from scratch.")
+        best_val_loss = float('inf')
+
 
     # Training Loop
-    best_val_loss = float('inf')
-    checkpoint_interval = 5  # Save checkpoint every 5 epochs
-
     for epoch in range(start_epoch, NUM_EPOCHS):
-        train_sampler.set_epoch(epoch)
-        train_loss = train(model, train_loader, optimizer, epoch, scaler, logger, device)
+        logger.info(f"\n[INFO] Starting Epoch {epoch + 1}/{NUM_EPOCHS}...")
+        train_loss = train(model, train_loader, optimizer, epoch, logger, DEVICE)
         scheduler.step()
 
         # Validation
-        val_loss = validate(model, val_loader, epoch, logger, device)
-        if dist.get_rank() == 0:
+        if (epoch + 1) % 2 == 0:
+            val_loss = validate(model, val_loader, epoch, logger, DEVICE)
             wandb.log({"epoch": epoch + 1, "training_loss": train_loss, "validation_loss": val_loss})
 
-            # Save checkpoint every checkpoint_interval epochs
-            if (epoch + 1) % checkpoint_interval == 0:
-                checkpoint_path = os.path.join(SAVE_DIR, f"checkpoint_epoch_{epoch + 1}.pth")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                checkpoint_path = os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth")
                 torch.save({
                     'epoch': epoch + 1,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
+                    'best_val_loss': best_val_loss,
                 }, checkpoint_path)
-                logger.info(f"Saved checkpoint to {checkpoint_path}")
+                logger.info(f"Saved Best Model to {checkpoint_path}")
 
-            # Save the best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_checkpoint_path = os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth")
-                torch.save(model.state_dict(), best_checkpoint_path)
-                logger.info(f"Saved Best Model to {best_checkpoint_path}")
 
-    if dist.get_rank() == 0:
-        wandb.finish()
-    dist.destroy_process_group()
+    wandb.finish()
+
 
 if __name__ == "__main__":
-    import torch.multiprocessing as mp
-    mp.set_start_method('spawn', force=True)
-    main()
+    mp.set_start_method("spawn", force=True)
+    parser = argparse.ArgumentParser(description="LiftUp Transformer Training Script")
+    parser.add_argument("--exp_name", required=True, help="Name of the experiment for logging and saving checkpoints")
+    parser.add_argument("--checkpoint_path", default=None, help="Path to the checkpoint to resume training")
+    args = parser.parse_args()
+    main(args.exp_name)
