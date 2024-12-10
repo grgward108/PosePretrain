@@ -77,7 +77,12 @@ class MotionLoader(data.Dataset):
 
     def apply_masking(self, clip_img):
         """
-        Apply masking to random frames based on the mask_ratio.
+        Apply masking to random frames with Gaussian noise based on the mask_ratio.
+        Args:
+            clip_img: Tensor of shape (num_frames, num_markers, marker_dim).
+        Returns:
+            clip_img: Masked input tensor.
+            mask: Mask tensor of shape (num_frames,).
         """
         num_frames = clip_img.shape[0]  # Number of frames in the clip
         mask = torch.ones(num_frames, dtype=torch.float32)  # Initialize mask with ones
@@ -87,7 +92,10 @@ class MotionLoader(data.Dataset):
             # Randomly select frames to mask
             masked_indices = torch.randperm(num_frames)[:num_masked_frames]
             mask[masked_indices] = 0.0  # Set masked frames to 0
-            clip_img[masked_indices] = 0.0  # Zero out the masked frames
+
+            # Replace masked frames with Gaussian noise
+            noise = torch.randn_like(clip_img[masked_indices])
+            clip_img[masked_indices] = noise  # Apply Gaussian noise to masked frames
 
         return clip_img, mask
 
@@ -387,17 +395,17 @@ class MotionLoader(data.Dataset):
             original_clip = torch.from_numpy(self.clip_img_list[index]).float()  # [T, num_markers, 3]
             masked_clip = original_clip.clone()  # Make a copy for masking
  
-
             if self.mask_ratio > 0.0:
                 masked_clip, mask = self.apply_masking(masked_clip)  # Apply masking
             else:
                 mask = torch.ones(original_clip.shape[0], dtype=torch.float32)  # All frames visible
 
-            return masked_clip, mask, original_clip, trans
+            return masked_clip, mask, original_clip
 
         elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
             clip_img = self.clip_img_list[index]  # [4, T, d]
             clip_img = torch.from_numpy(clip_img).float().permute(0, 2, 1)  # [4, d, T]
+            
         return [clip_img]
 
 
