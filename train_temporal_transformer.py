@@ -21,7 +21,7 @@ CLIP_FPS = 30
 MARKERS_TYPE = 'f15_p5'
 MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
-STRIDE = 30
+STRIDE = None
 
 # Validation frequency
 VALIDATE_EVERY = 2
@@ -65,7 +65,7 @@ def count_learnable_parameters(model):
 
 def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, save_dir=None, epoch=None):
     """
-    Validate the model on the validation dataset with the same masking logic as training.
+    Validate the model on the validation dataset with the inverted masking logic.
     Args:
         model: The model to validate.
         val_loader: DataLoader for the validation dataset.
@@ -91,14 +91,17 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             # Expand mask dimensions to match outputs and ground truth
             mask = mask.unsqueeze(-1).unsqueeze(-1)
 
-            # Apply the mask
-            masked_outputs = outputs * mask
-            masked_original = original_clip * mask
+            # Invert the mask for the unseen parts
+            inverted_mask = 1 - mask
 
-            # Compute the mean squared error loss only on the masked elements
-            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
-            raw_loss = masked_loss.sum()  # Total loss across all masked elements
-            normalized_loss = raw_loss / mask.sum()  # Normalize by the number of masked elements
+            # Apply the inverted mask
+            unseen_outputs = outputs * inverted_mask
+            unseen_original = original_clip * inverted_mask
+
+            # Compute the mean squared error loss only on the unseen elements
+            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
+            raw_loss = unseen_loss.sum()  # Total loss across all unseen elements
+            normalized_loss = raw_loss / inverted_mask.sum()  # Normalize by the number of unseen elements
 
             val_loss += normalized_loss.item()
 
@@ -137,15 +140,17 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             # Expand mask dimensions
             mask = mask.to(outputs.device).unsqueeze(-1).unsqueeze(-1)
 
-            # Apply mask
-            masked_outputs = outputs * mask
-            masked_original = original_clip * mask
+            # Invert the mask to focus on unseen elements
+            inverted_mask = 1 - mask
 
-            # Compute masked loss and normalize
-            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
-            raw_loss = masked_loss.sum()  # Total loss
-            normalized_loss = raw_loss / mask.sum()  # Normalize by the number of masked elements
-            
+            # Apply inverted mask
+            unseen_outputs = outputs * inverted_mask
+            unseen_original = original_clip * inverted_mask
+
+            # Compute loss only on unseen elements
+            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
+            raw_loss = unseen_loss.sum()  # Total loss for unseen elements
+            normalized_loss = raw_loss / inverted_mask.sum()  # Normalize by the number of unseen elements
 
             # Backward pass and optimization
             optimizer.zero_grad()
