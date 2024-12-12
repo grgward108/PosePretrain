@@ -19,3 +19,7 @@ This module has 2 transformers, Temporal Transformer and Spatial Transformer.
 - Using a masking strategy to train transformer to recover missing frames 
 - Marker representation here is 17 joints. (Following Human3.6M)
 - The objective is to train the Temporal Transformer to understand the temporal relationships between markers
+
+## Liftup Transformer
+- Lift up 17 joints to 143 markers
+- The objective is to use this on the Temporal Transformer output to recreate the 143 markers.  
