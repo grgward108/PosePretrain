@@ -8,6 +8,7 @@ from TemporalTransformer.models.models import TemporalTransformer
 from TemporalTransformer.data.lazyloading import MotionLoader  # This should be the updated lazy-loading version
 import argparse
 import logging
+import wandb
 import numpy as np
 
 # Hyperparameters
@@ -51,34 +52,40 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             mask = mask.to(device)
             original_clip = original_clip.to(device)
 
+            # Forward pass
             outputs = model(masked_clip)
 
             # Expand mask dimensions
             mask = mask.unsqueeze(-1).unsqueeze(-1)
 
-            masked_outputs = outputs * mask
-            masked_original = original_clip * mask
+            # Invert mask for unseen elements
+            inverted_mask = 1 - mask
+            unseen_outputs = outputs * inverted_mask
+            unseen_original = original_clip * inverted_mask
 
-            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
-            raw_loss = masked_loss.sum()
-            normalized_loss = raw_loss / mask.sum()
+            # Compute loss for unseen elements
+            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
+            raw_loss = unseen_loss.sum()
+            normalized_loss = raw_loss / inverted_mask.sum()
             val_loss += normalized_loss.item()
 
+            # Save first batch reconstruction if required
             if save_reconstruction and not first_batch_saved:
-                # For example, save reconstruction of the first batch encountered after some iterations
-                if save_dir is not None and epoch is not None and i == 6:  
+                if save_dir is not None and epoch is not None and i == 6:  # Save for the first batch
                     save_reconstruction_npz(
                         markers=masked_clip,
                         reconstructed_markers=outputs,
                         original_markers=original_clip,
-                        mask=mask.squeeze(-1).squeeze(-1),
+                        mask=inverted_mask.squeeze(-1).squeeze(-1),  # Use inverted mask for saving
                         save_dir=save_dir,
                         epoch=epoch
                     )
                     first_batch_saved = True
+
             i += 1
 
     avg_val_loss = val_loss / len(val_loader)
+    wandb.log({"Validation Loss": avg_val_loss})  # Log validation loss to WandB
     return avg_val_loss
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
@@ -91,16 +98,23 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             masked_clip = masked_clip.to(DEVICE)
             original_clip = original_clip.to(DEVICE)
 
+            # Forward pass
             outputs = model(masked_clip)
 
+            # Expand mask dimensions
             mask = mask.to(outputs.device).unsqueeze(-1).unsqueeze(-1)
-            masked_outputs = outputs * mask
-            masked_original = original_clip * mask
 
-            masked_loss = ((masked_outputs - masked_original) ** 2) * mask
-            raw_loss = masked_loss.sum()
-            normalized_loss = raw_loss / mask.sum()
+            # Invert mask to compute loss for unseen elements
+            inverted_mask = 1 - mask
+            unseen_outputs = outputs * inverted_mask
+            unseen_original = original_clip * inverted_mask
 
+            # Compute loss for unseen elements
+            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
+            raw_loss = unseen_loss.sum()  # Total loss
+            normalized_loss = raw_loss / inverted_mask.sum()  # Normalize by unseen elements
+
+            # Backward pass and optimization
             optimizer.zero_grad()
             normalized_loss.backward()
             optimizer.step()
@@ -108,19 +122,26 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             epoch_loss += normalized_loss.item()
             progress_bar.set_postfix({"Loss": normalized_loss.item()})
 
+            # Log training metrics to WandB
+            wandb.log({"Training Loss (Batch)": normalized_loss.item()})
+
+        # Log average training loss for the epoch
         avg_epoch_loss = epoch_loss / len(train_loader)
         logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Training Loss: {avg_epoch_loss:.4f}")
+        wandb.log({"Training Loss (Epoch)": avg_epoch_loss, "Epoch": epoch + 1})
 
+        # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'epoch_{epoch+1}.pth')
             torch.save({
                 'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': model.module.state_dict() if torch.cuda.device_count() > 1 else model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_epoch_loss,
             }, checkpoint_path)
             logger.info(f"Checkpoint saved at {checkpoint_path}")
 
+        # Validate every VALIDATE_EVERY epochs
         if (epoch + 1) % VALIDATE_EVERY == 0:
             save_dir = os.path.join(checkpoint_dir, "reconstruction_val")
             val_loss = validate(
@@ -128,11 +149,13 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                 val_loader=val_loader,
                 mask_ratio=MASK_RATIO,
                 device=DEVICE,
-                save_reconstruction=True,
+                save_reconstruction=True,  # Enable saving reconstruction
                 save_dir=save_dir,
                 epoch=epoch + 1
             )
             logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Validation Loss: {val_loss:.4f}")
+            wandb.log({"Validation Loss": val_loss, "Epoch": epoch + 1})
+
 
 if __name__ == "__main__":
     # Argument parser
@@ -156,6 +179,8 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger()
 
+    wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name)
+
     log_dir = os.path.join('./temporal_log', exp_name)
 
     # Initialize dataset without reading data immediately
@@ -173,7 +198,7 @@ if __name__ == "__main__":
 
     # Now read the data (lazy loading metadata)
     train_dataset.read_data(
-        amass_datasets=['HumanEva', 'ACCAD', 'CMU', 'DanceDB', 'Eyes_Japan_Dataset', 'GRAB'],
+        amass_datasets=['HumanEva'],
         amass_dir='../../../data/edwarde/dataset/AMASS',
         stride=STRIDE
     )
