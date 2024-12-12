@@ -43,6 +43,7 @@ def count_learnable_parameters(model):
 def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, save_dir=None, epoch=None):
     model.eval()
     val_loss = 0.0
+    velocity_loss_total = 0.0
     first_batch_saved = False
     i = 0
 
@@ -69,9 +70,17 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             normalized_loss = raw_loss / inverted_mask.sum()
             val_loss += normalized_loss.item()
 
+            # Compute velocity loss for masked parts
+            original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
+            reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
+            velocity_mask = inverted_mask[:, :, :, 1:]  # Mask velocity for unseen parts
+            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * velocity_mask
+            velocity_loss = velocity_diff.sum() / velocity_mask.sum()
+            velocity_loss_total += velocity_loss.item()
+
             # Save first batch reconstruction if required
             if save_reconstruction and not first_batch_saved:
-                if save_dir is not None and epoch is not None and i == 6:  # Save for the first batch
+                if save_dir is not None and epoch is not None and i == 15:  # Save for the first batch
                     save_reconstruction_npz(
                         markers=masked_clip,
                         reconstructed_markers=outputs,
@@ -84,14 +93,21 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
 
             i += 1
 
-    avg_val_loss = val_loss / len(val_loader)
-    wandb.log({"Validation Loss": avg_val_loss})  # Log validation loss to WandB
-    return avg_val_loss
+    avg_rec_loss = val_loss / len(val_loader)
+    avg_velocity_loss = velocity_loss_total / len(val_loader)
+    total_loss = 0.8 * avg_rec_loss + 0.2 * avg_velocity_loss
+    wandb.log({
+        "Validation Loss (Reconstruction)": avg_rec_loss,
+        "Validation Loss (Velocity)": avg_velocity_loss,
+        "Validation Loss (Total)": total_loss,
+    })
+    return total_loss
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
     model.train()
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
+        velocity_loss_total = 0.0  # Track velocity loss for the epoch
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
         for masked_clip, mask, original_clip in progress_bar:
@@ -109,26 +125,61 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             unseen_outputs = outputs * inverted_mask
             unseen_original = original_clip * inverted_mask
 
-            # Compute loss for unseen elements
+            # Compute reconstruction loss for unseen elements
             unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
-            raw_loss = unseen_loss.sum()  # Total loss
-            normalized_loss = raw_loss / inverted_mask.sum()  # Normalize by unseen elements
+            raw_rec_loss = unseen_loss.sum()
+            normalized_rec_loss = raw_rec_loss / inverted_mask.sum()
+
+            # Compute velocity loss for unseen elements
+            original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
+            reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
+            velocity_mask = inverted_mask[:, :, :, 1:]  # Adjust mask for velocity computation
+            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * velocity_mask
+            raw_velocity_loss = velocity_diff.sum()
+            normalized_velocity_loss = raw_velocity_loss / velocity_mask.sum()
+
+            # Combine reconstruction and velocity losses
+            total_loss = 0.8 * normalized_rec_loss + 0.2 * normalized_velocity_loss
 
             # Backward pass and optimization
             optimizer.zero_grad()
-            normalized_loss.backward()
+            total_loss.backward()
             optimizer.step()
 
-            epoch_loss += normalized_loss.item()
-            progress_bar.set_postfix({"Loss": normalized_loss.item()})
+            # Update epoch loss
+            epoch_loss += normalized_rec_loss.item()
+            velocity_loss_total += normalized_velocity_loss.item()
+            progress_bar.set_postfix({
+                "Reconstruction Loss": normalized_rec_loss.item(),
+                "Velocity Loss": normalized_velocity_loss.item(),
+                "Total Loss": total_loss.item()
+            })
 
             # Log training metrics to WandB
-            wandb.log({"Training Loss (Batch)": normalized_loss.item()})
+            wandb.log({
+                "Training Loss (Reconstruction)": normalized_rec_loss.item(),
+                "Training Loss (Velocity)": normalized_velocity_loss.item(),
+                "Training Loss (Batch Total)": total_loss.item(),
+            })
 
         # Log average training loss for the epoch
-        avg_epoch_loss = epoch_loss / len(train_loader)
-        logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Training Loss: {avg_epoch_loss:.4f}")
-        wandb.log({"Training Loss (Epoch)": avg_epoch_loss, "Epoch": epoch + 1})
+        avg_epoch_rec_loss = epoch_loss / len(train_loader)
+        avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
+        avg_epoch_total_loss = 0.8 * avg_epoch_rec_loss + 0.2 * avg_epoch_velocity_loss
+
+        logger.info(
+            f"Epoch [{epoch+1}/{EPOCHS}] "
+            f"Reconstruction Loss: {avg_epoch_rec_loss:.4f}, "
+            f"Velocity Loss: {avg_epoch_velocity_loss:.4f}, "
+            f"Total Loss: {avg_epoch_total_loss:.4f}"
+        )
+
+        wandb.log({
+            "Training Loss (Epoch Reconstruction)": avg_epoch_rec_loss,
+            "Training Loss (Epoch Velocity)": avg_epoch_velocity_loss,
+            "Training Loss (Epoch Total)": avg_epoch_total_loss,
+            "Epoch": epoch + 1,
+        })
 
         # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
@@ -137,7 +188,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                 'epoch': epoch + 1,
                 'model_state_dict': model.module.state_dict() if torch.cuda.device_count() > 1 else model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_epoch_loss,
+                'loss': avg_epoch_total_loss,
             }, checkpoint_path)
             logger.info(f"Checkpoint saved at {checkpoint_path}")
 
@@ -198,7 +249,7 @@ if __name__ == "__main__":
 
     # Now read the data (lazy loading metadata)
     train_dataset.read_data(
-        amass_datasets=['HumanEva'],
+        amass_datasets=['HumanEva', 'ACCAD', 'CMU','DanceDB', 'Eyes_Japan_Dataset', 'GRAB'],
         amass_dir='../../../data/edwarde/dataset/AMASS',
         stride=STRIDE
     )
