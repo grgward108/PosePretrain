@@ -75,32 +75,6 @@ class MotionLoader(data.Dataset):
                 self.Xmean = None
                 self.Xstd = None
 
-    def apply_nan_masking(self, clip_img):
-        """Applies NaN masking to random frames in a clip.
-
-        Args:
-            clip_img: The input clip tensor (T, J, 3), where T is the number of frames, 
-                    J is the number of joints, and 3 are the spatial dimensions.
-            mask_ratio: The proportion of frames to mask (0.0 to 1.0).
-
-        Returns:
-            A tuple containing:
-            - masked_clip: The clip with NaN values in masked frames.
-            - mask: A boolean mask (True for masked frames, False otherwise).
-        """
-        num_frames = clip_img.shape[0]
-        num_masked_frames = int(self.mask_ratio * num_frames)
-
-        masked_clip = clip_img.clone()  # Important: Clone to avoid modifying the original
-        mask = torch.zeros(num_frames, dtype=torch.bool) #initialize as all false
-
-        if num_masked_frames > 0:
-            masked_indices = torch.randperm(num_frames)[:num_masked_frames]
-            masked_clip[masked_indices] = float('nan')
-            mask[masked_indices] = True #set to true if it is masked
-
-        return masked_clip, mask
-
     def apply_masking(self, clip_img):
         """
         Apply masking to random frames with Gaussian noise based on the mask_ratio.
@@ -238,7 +212,7 @@ class MotionLoader(data.Dataset):
         masked_clip = original_clip.clone()
 
         if self.mask_ratio > 0.0:
-            masked_clip, mask = self.apply_nan_masking(masked_clip)
+            masked_clip, mask = self.apply_masking(masked_clip)
         else:
             mask = torch.ones(original_clip.shape[0], dtype=torch.float32)
 
