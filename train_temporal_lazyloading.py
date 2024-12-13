@@ -96,6 +96,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
     total_loss = 0.8 * avg_rec_loss + 0.2 * avg_velocity_loss
+
     wandb.log({
         "Validation Loss (Reconstruction)": avg_rec_loss,
         "Validation Loss (Velocity)": avg_velocity_loss,
@@ -186,7 +187,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             checkpoint_path = os.path.join(checkpoint_dir, f'epoch_{epoch+1}.pth')
             torch.save({
                 'epoch': epoch + 1,
-                'model_state_dict': model.module.state_dict() if torch.cuda.device_count() > 1 else model.state_dict(),
+                'model_state_dict': model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_epoch_total_loss,
             }, checkpoint_path)
