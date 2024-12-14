@@ -7,3 +7,5 @@ spatial_log/
 SpatialTransformer/data/__pycache__
 wandb/
 wandb
+liftup_log/
+temporal_log/
