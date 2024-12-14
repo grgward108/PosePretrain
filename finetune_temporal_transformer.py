@@ -56,52 +56,47 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     val_loss = 0.0
     velocity_loss_total = 0.0
     first_batch_saved = False
-    i = 0
 
     with torch.no_grad():
-        for clip_img, slerp_img, *_ in tqdm(val_loader, desc="Validating"):
+        for i, (clip_img, slerp_img, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
             original_clip = clip_img.to(device)
             slerp_img = slerp_img.to(device)
-            static_mask = generate_static_mask(length=slerp_img.shape[-1]).to(device)
 
-            static_mask =  static_mask.unsqueeze(0).unsqueeze(0)
-            static_mask = static_mask.expand(outputs.shape)
+            # Permute to match expected input format
+            original_clip = original_clip.permute(0, 3, 2, 1)
             # Forward pass
             outputs = model(slerp_img)
 
-            # Invert mask for unseen elements
+            # Generate static mask and expand
+            static_mask = generate_static_mask(length=slerp_img.shape[-1]).to(device)
+            static_mask = static_mask.unsqueeze(0).unsqueeze(0).expand(outputs.shape)
+
+
+            # Invert mask and compute unseen losses
             inverted_mask = static_mask
             unseen_outputs = outputs * inverted_mask
             unseen_original = original_clip * inverted_mask
 
-            # Compute loss for unseen elements
             unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
-            raw_loss = unseen_loss.sum()
-            normalized_loss = raw_loss / inverted_mask.sum()
-            val_loss += normalized_loss.item()
+            val_loss += unseen_loss.sum().item() / inverted_mask.sum().item()
 
-            # Compute velocity loss for masked parts
+            # Compute velocity loss
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
             reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
-            velocity_mask = inverted_mask[:, :, :, 1:]  # Mask velocity for unseen parts
-            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * velocity_mask
-            velocity_loss = velocity_diff.sum() / velocity_mask.sum()
-            velocity_loss_total += velocity_loss.item()
+            velocity_mask = inverted_mask[:, :, :, 1:]
+            velocity_loss_total += ((original_velocity - reconstructed_velocity) ** 2 * velocity_mask).sum().item() / velocity_mask.sum().item()
 
-            # Save first batch reconstruction if required
-            if save_reconstruction and not first_batch_saved:
-                if save_dir is not None and epoch is not None and i == 15:  # Save for the first batch
-                    save_reconstruction_npz(
-                        markers=slerp_img,
-                        reconstructed_markers=outputs,
-                        original_markers=original_clip,
-                        mask=inverted_mask.squeeze(-1).squeeze(-1),  # Use inverted mask for saving
-                        save_dir=save_dir,
-                        epoch=epoch
-                    )
-                    first_batch_saved = True
-
-            i += 1
+            # Save reconstruction
+            if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 0:
+                save_reconstruction_npz(
+                    markers=slerp_img,
+                    reconstructed_markers=outputs,
+                    original_markers=original_clip,
+                    mask=inverted_mask.squeeze(-1).squeeze(-1),
+                    save_dir=save_dir,
+                    epoch=epoch
+                )
+                first_batch_saved = True
 
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
@@ -114,6 +109,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     })
     return total_loss
 
+
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
     model.train()
     for epoch in range(EPOCHS):
@@ -123,20 +119,15 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
 
         for clip_img, slerp_img, mask, *_ in progress_bar:
             original_clip = clip_img.to(DEVICE)
-            print(f"original_clip shape: {original_clip.shape}")
+            original_clip = original_clip.permute(0, 3, 2, 1)
             slerp_img = slerp_img.to(DEVICE)
             # Forward pass
             outputs = model(slerp_img)
             static_mask = generate_static_mask(length=slerp_img.shape[-1]).to(DEVICE)
             static_mask =  static_mask.unsqueeze(0).unsqueeze(0)
             static_mask = static_mask.expand(outputs.shape)
-            original_clip = original_clip.permute(0, 3, 2, 1)
-
             # Invert mask to compute loss for unseen elements
             inverted_mask = static_mask
-            print(f"original_clip shape after permute: {original_clip.shape}")
-            print(f"outputs shape: {outputs.shape}")
-            print(f"inverted_mask shape: {inverted_mask.shape}")
             unseen_outputs = outputs * inverted_mask
             unseen_original = original_clip * inverted_mask
 
@@ -246,7 +237,32 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger()
 
+    logger.info("Starting training script with the following parameters:")
+    logger.info(f"Experiment Name: {exp_name}")
+    logger.info(f"Checkpoint Directory: {checkpoint_dir}")
+    logger.info(f"Batch Size: {BATCH_SIZE}")
+    logger.info(f"Epochs: {EPOCHS}")
+    logger.info(f"Learning Rate: {LEARNING_RATE}")
+    logger.info(f"Mask Ratio: {MASK_RATIO}")
+    logger.info(f"Clip Seconds: {CLIP_SECONDS}")
+    logger.info(f"Clip FPS: {CLIP_FPS}")
+    logger.info(f"Mode: {MODE}")
+    logger.info(f"Markers Type: {MARKERS_TYPE}")
+    logger.info(f"Device: {DEVICE}")
+
     wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name, mode='dryrun')
+    wandb.config.update({
+        "experiment_name": exp_name,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "learning_rate": LEARNING_RATE,
+        "mask_ratio": MASK_RATIO,
+        "clip_seconds": CLIP_SECONDS,
+        "clip_fps": CLIP_FPS,
+        "mode": MODE,
+        "markers_type": MARKERS_TYPE,
+        "device": DEVICE.type,
+    })
 
     train_dataset = GRAB_DataLoader(clip_seconds=2, clip_fps=30, mode=mode, markers_type=markers_type)
     train_dataset.read_data(train_datasets, grab_dir)
@@ -260,8 +276,8 @@ if __name__ == "__main__":
     """143 markers / 55 joints if with_hand else 72 markers / 25 joints"""
     val_dataset.create_body_repr(with_hand=False, smplx_model_path=smplx_model_path)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     model = TemporalTransformer(
         dim_in=3,
@@ -273,15 +289,18 @@ if __name__ == "__main__":
         maxlen=CLIP_SECONDS * CLIP_FPS + 1  # This should match the input length of your sequence
     ).to(DEVICE)
 
-    checkpoint = torch.load(TEMPORAL_CHECKPOINT_PATH, map_location=DEVICE)
-
-# Extract only the model's state_dict
-    model.load_state_dict(checkpoint['model_state_dict'])
-
-
+    # Load checkpoint
+    if os.path.exists(TEMPORAL_CHECKPOINT_PATH):
+        logger.info(f"Loading model from checkpoint: {TEMPORAL_CHECKPOINT_PATH}")
+        checkpoint = torch.load(TEMPORAL_CHECKPOINT_PATH, map_location=DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info("Checkpoint loaded successfully.")
+    else:
+        logger.warning(f"Checkpoint not found at {TEMPORAL_CHECKPOINT_PATH}. Training from scratch.")
 
     num_params = count_learnable_parameters(model)
     logger.info(f"Number of learnable parameters in TemporalTransformer: {num_params:,}")
+    wandb.config.update({"num_learnable_parameters": num_params})
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
