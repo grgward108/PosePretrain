@@ -37,7 +37,13 @@ def save_reconstruction_npz(markers, reconstructed_markers, original_markers, ma
     masked = markers.cpu().numpy()
     reconstructed = reconstructed_markers.cpu().numpy()
     ground_truth = original_markers.cpu().numpy()
-    mask_np = mask.cpu().numpy()
+
+    # Handle the case where mask is None
+    if mask is not None:
+        mask_np = mask.cpu().numpy()
+    else:
+        mask_np = None  # No mask to save
+
     npz_path = os.path.join(save_dir, f"epoch_{epoch}_reconstruction.npz")
     np.savez_compressed(npz_path, masked=masked, reconstructed=reconstructed, ground_truth=ground_truth, mask=mask_np)
     print(f"Saved reconstruction data to {npz_path}")
@@ -51,11 +57,16 @@ def generate_static_mask(length=61):
 def count_learnable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, save_dir=None, epoch=None):
+def validate(model, val_loader, device, save_reconstruction=False, save_dir=None, epoch=None):
     model.eval()
     val_loss = 0.0
     velocity_loss_total = 0.0
+    acceleration_loss_total = 0.0
+    leg_loss_total = 0.0
     first_batch_saved = False
+
+    # Define leg indices
+    leg_indices = [1, 2, 4, 5, 7, 8, 10, 11]
 
     with torch.no_grad():
         for i, (clip_img, slerp_img, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
@@ -64,88 +75,121 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
 
             # Permute to match expected input format
             original_clip = original_clip.permute(0, 3, 2, 1)
+
             # Forward pass
             outputs = model(slerp_img)
 
-            # Generate static mask and expand
-            static_mask = generate_static_mask(length=slerp_img.shape[-1]).to(device)
-            static_mask = static_mask.unsqueeze(0).unsqueeze(0).expand(outputs.shape)
+            # Create weight tensor
+            weights = torch.ones_like(outputs)  # Default weight of 1 for all joints
+            weights[:, :, leg_indices, :] *= 2.0  # Double the weight for leg joints
 
+            # Weighted reconstruction loss
+            weighted_rec_loss = ((outputs - original_clip) ** 2 * weights).sum() / weights.sum()
 
-            # Invert mask and compute unseen losses
-            inverted_mask = static_mask
-            unseen_outputs = outputs * inverted_mask
-            unseen_original = original_clip * inverted_mask
-
-            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
-            val_loss += unseen_loss.sum().item() / inverted_mask.sum().item()
+            # Leg-specific reconstruction loss (for logging)
+            leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
+            leg_loss_total += leg_loss.item()
 
             # Compute velocity loss
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
             reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
-            velocity_mask = inverted_mask[:, :, :, 1:]
-            velocity_loss_total += ((original_velocity - reconstructed_velocity) ** 2 * velocity_mask).sum().item() / velocity_mask.sum().item()
+            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]
+            weighted_velocity_loss = velocity_diff.sum() / weights[:, :, :, 1:].sum()
 
-            # Save reconstruction
+            # Compute acceleration loss
+            original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
+            reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
+            acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
+            weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
+
+            # Accumulate losses
+            val_loss += weighted_rec_loss.item()
+            velocity_loss_total += weighted_velocity_loss.item()
+            acceleration_loss_total += weighted_acceleration_loss.item()
+
+            # Save reconstruction for the first batch if needed
             if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 0:
                 save_reconstruction_npz(
                     markers=slerp_img,
                     reconstructed_markers=outputs,
                     original_markers=original_clip,
-                    mask=inverted_mask.squeeze(-1).squeeze(-1),
+                    mask=None,  # Mask is not used
                     save_dir=save_dir,
                     epoch=epoch
                 )
                 first_batch_saved = True
 
+    # Compute average losses
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
-    total_loss = 0.8 * avg_rec_loss + 0.2 * avg_velocity_loss
+    avg_acceleration_loss = acceleration_loss_total / len(val_loader)
+    avg_leg_loss = leg_loss_total / len(val_loader)
+    total_loss = (
+        0.5 * avg_rec_loss +
+        0.3 * avg_velocity_loss +
+        0.2 * avg_acceleration_loss
+    )
 
+    # Log metrics to WandB
     wandb.log({
         "Validation Loss (Reconstruction)": avg_rec_loss,
         "Validation Loss (Velocity)": avg_velocity_loss,
+        "Validation Loss (Acceleration)": avg_acceleration_loss,
+        "Validation Loss (Leg Reconstruction)": avg_leg_loss,
         "Validation Loss (Total)": total_loss,
     })
-    return total_loss
 
+    return total_loss
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
     model.train()
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
-        velocity_loss_total = 0.0  # Track velocity loss for the epoch
+        velocity_loss_total = 0.0
+        acceleration_loss_total = 0.0  # Track acceleration loss for the epoch
+        leg_loss_total = 0.0  # Track leg-specific reconstruction loss
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
         for clip_img, slerp_img, mask, *_ in progress_bar:
             original_clip = clip_img.to(DEVICE)
             original_clip = original_clip.permute(0, 3, 2, 1)
             slerp_img = slerp_img.to(DEVICE)
+
             # Forward pass
             outputs = model(slerp_img)
-            static_mask = generate_static_mask(length=slerp_img.shape[-1]).to(DEVICE)
-            static_mask =  static_mask.unsqueeze(0).unsqueeze(0)
-            static_mask = static_mask.expand(outputs.shape)
-            # Invert mask to compute loss for unseen elements
-            inverted_mask = static_mask
-            unseen_outputs = outputs * inverted_mask
-            unseen_original = original_clip * inverted_mask
 
-            # Compute reconstruction loss for unseen elements
-            unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
-            raw_rec_loss = unseen_loss.sum()
-            normalized_rec_loss = raw_rec_loss / inverted_mask.sum()
+            # Define leg indices
+            leg_indices = [1, 2, 4, 5, 7, 8, 10, 11]
 
-            # Compute velocity loss for unseen elements
+            # Create weight tensor
+            weights = torch.ones_like(outputs)  # Default weight of 1 for all joints
+            weights[:, :, leg_indices, :] *= 2.0  # Double the weight for leg joints
+
+            # Weighted reconstruction loss
+            weighted_rec_loss = ((outputs - original_clip) ** 2 * weights).sum() / weights.sum()
+
+            # Leg-specific reconstruction loss (for logging)
+            leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
+            leg_loss_total += leg_loss.item()
+
+            # Compute velocity loss
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
             reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
-            velocity_mask = inverted_mask[:, :, :, 1:]  # Adjust mask for velocity computation
-            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * velocity_mask
-            raw_velocity_loss = velocity_diff.sum()
-            normalized_velocity_loss = raw_velocity_loss / velocity_mask.sum()
+            velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]
+            weighted_velocity_loss = velocity_diff.sum() / weights[:, :, :, 1:].sum()
 
-            # Combine reconstruction and velocity losses
-            total_loss = 0.8 * normalized_rec_loss + 0.2 * normalized_velocity_loss
+            # Compute acceleration loss
+            original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
+            reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
+            acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
+            weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
+
+            # Combine losses
+            total_loss = (
+                0.5 * weighted_rec_loss +
+                0.3 * weighted_velocity_loss +
+                0.2 * weighted_acceleration_loss
+            )
 
             # Backward pass and optimization
             optimizer.zero_grad()
@@ -153,37 +197,51 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             optimizer.step()
 
             # Update epoch loss
-            epoch_loss += normalized_rec_loss.item()
-            velocity_loss_total += normalized_velocity_loss.item()
+            epoch_loss += weighted_rec_loss.item()
+            velocity_loss_total += weighted_velocity_loss.item()
+            acceleration_loss_total += weighted_acceleration_loss.item()
             progress_bar.set_postfix({
-                "Reconstruction Loss": normalized_rec_loss.item(),
-                "Velocity Loss": normalized_velocity_loss.item(),
+                "Reconstruction Loss": weighted_rec_loss.item(),
+                "Velocity Loss": weighted_velocity_loss.item(),
+                "Acceleration Loss": weighted_acceleration_loss.item(),
                 "Total Loss": total_loss.item()
             })
 
             # Log training metrics to WandB
             wandb.log({
-                "Training Loss (Reconstruction)": normalized_rec_loss.item(),
-                "Training Loss (Velocity)": normalized_velocity_loss.item(),
+                "Training Loss (Reconstruction)": weighted_rec_loss.item(),
+                "Training Loss (Velocity)": weighted_velocity_loss.item(),
+                "Training Loss (Acceleration)": weighted_acceleration_loss.item(),
+                "Leg Reconstruction Loss": leg_loss.item(),
                 "Training Loss (Batch Total)": total_loss.item(),
             })
 
         # Log average training loss for the epoch
         avg_epoch_rec_loss = epoch_loss / len(train_loader)
         avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
-        avg_epoch_total_loss = 0.8 * avg_epoch_rec_loss + 0.2 * avg_epoch_velocity_loss
+        avg_epoch_acceleration_loss = acceleration_loss_total / len(train_loader)
+        avg_epoch_leg_loss = leg_loss_total / len(train_loader)
+        avg_epoch_total_loss = (
+            0.5 * avg_epoch_rec_loss +
+            0.3 * avg_epoch_velocity_loss +
+            0.2 * avg_epoch_acceleration_loss
+        )
 
         logger.info(
             f"Epoch [{epoch+1}/{EPOCHS}] "
             f"Reconstruction Loss: {avg_epoch_rec_loss:.4f}, "
             f"Velocity Loss: {avg_epoch_velocity_loss:.4f}, "
+            f"Acceleration Loss: {avg_epoch_acceleration_loss:.4f}, "
+            f"Leg Loss: {avg_epoch_leg_loss:.4f}, "
             f"Total Loss: {avg_epoch_total_loss:.4f}"
         )
 
         wandb.log({
-            "Training Loss (Epoch Reconstruction)": avg_epoch_rec_loss,
-            "Training Loss (Epoch Velocity)": avg_epoch_velocity_loss,
-            "Training Loss (Epoch Total)": avg_epoch_total_loss,
+            "Epoch Training Reconstruction Loss": avg_epoch_rec_loss,
+            "Epoch Training Velocity Loss": avg_epoch_velocity_loss,
+            "Epoch Training Acceleration Loss": avg_epoch_acceleration_loss,
+            "Epoch Training Leg Loss": avg_epoch_leg_loss,
+            "Epoch Training Total Loss": avg_epoch_total_loss,
             "Epoch": epoch + 1,
         })
 
@@ -204,7 +262,6 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             val_loss = validate(
                 model,
                 val_loader=val_loader,
-                mask_ratio=MASK_RATIO,
                 device=DEVICE,
                 save_reconstruction=True,  # Enable saving reconstruction
                 save_dir=save_dir,
@@ -212,8 +269,6 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             )
             logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Validation Loss: {val_loss:.4f}")
             wandb.log({"Validation Loss": val_loss, "Epoch": epoch + 1})
-
-
 
 
 if __name__ == "__main__":

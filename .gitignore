@@ -9,3 +9,4 @@ wandb/
 liftup_log/
 temporal_log/
 LAFAN
+finetune_temporal_log/
