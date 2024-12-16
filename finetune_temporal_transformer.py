@@ -25,7 +25,7 @@ NUM_JOINTS = 25
 TEMPORAL_CHECKPOINT_PATH = 'temporal_pretrained/epoch_15.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
-train_datasets = ['s1', 's2']
+train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
 test_datasets = ['s9', 's10']
 smplx_model_path = 'body_utils/body_models'
 markers_type = 'f15_p22'  # Example markers type
