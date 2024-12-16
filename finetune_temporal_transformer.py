@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from PoseBridge.data.dataloader import GRAB_DataLoader  # Replace 'your_module' with the actual module where MotionLoader is defined
+from PoseBridge.data.dataloader import GRAB_DataLoader  
 from torch.utils.data import DataLoader
 import argparse
 import logging
@@ -10,9 +10,9 @@ from TemporalTransformer.models.models import TemporalTransformer
 from tqdm import tqdm
 import torch.optim as optim
 
-BATCH_SIZE = 32
-EPOCHS = 50
-LEARNING_RATE = 1e-5
+BATCH_SIZE = 16
+EPOCHS = 100
+LEARNING_RATE = 3e-4
 MASK_RATIO = 0.15
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 CLIP_SECONDS = 2
@@ -25,12 +25,12 @@ NUM_JOINTS = 25
 TEMPORAL_CHECKPOINT_PATH = 'temporal_pretrained/epoch_15.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
-train_datasets = ['s1']
-test_datasets = ['s9']
+train_datasets = ['s1', 's2']
+test_datasets = ['s9', 's10']
 smplx_model_path = 'body_utils/body_models'
 markers_type = 'f15_p22'  # Example markers type
 mode = 'local_joints_3dv' 
-VALIDATE_EVERY = 1
+VALIDATE_EVERY = 5
 
 def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
     os.makedirs(save_dir, exist_ok=True)
@@ -186,9 +186,9 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
 
             # Combine losses
             total_loss = (
-                0.5 * weighted_rec_loss +
-                0.3 * weighted_velocity_loss +
-                0.2 * weighted_acceleration_loss
+                0.7 * weighted_rec_loss +
+                0.2 * weighted_velocity_loss +
+                0.1 * weighted_acceleration_loss
             )
 
             # Backward pass and optimization
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     logger.info(f"Markers Type: {MARKERS_TYPE}")
     logger.info(f"Device: {DEVICE}")
 
-    wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name, mode='dryrun')
+    wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name)
     wandb.config.update({
         "experiment_name": exp_name,
         "batch_size": BATCH_SIZE,

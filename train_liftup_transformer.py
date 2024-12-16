@@ -22,7 +22,7 @@ NUM_EPOCHS = 100
 EMBED_DIM = 64
 NUM_HEADS = 4
 NUM_LAYERS = 6
-NUM_JOINTS = 22  # Number of input joints
+NUM_JOINTS = 25  # Number of input joints
 NUM_MARKERS = 143  # Number of output markers
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
