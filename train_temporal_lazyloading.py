@@ -10,11 +10,12 @@ import argparse
 import logging
 import wandb
 import numpy as np
+import torch.distributed as dist
 
 # Hyperparameters
 BATCH_SIZE = 32
 EPOCHS = 50
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 3e-4
 MASK_RATIO = 0.70
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 CLIP_SECONDS = 2
@@ -26,6 +27,16 @@ STRIDE = 30
 
 # Validation frequency
 VALIDATE_EVERY = 1
+
+def save_checkpoint(model, optimizer, epoch, checkpoint_dir):
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch}_checkpoint.pth")
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, checkpoint_path)
+    print(f"Checkpoint saved: {checkpoint_path}")
 
 def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
     os.makedirs(save_dir, exist_ok=True)
@@ -41,6 +52,7 @@ def count_learnable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, save_dir=None, epoch=None):
+    is_rank_0 = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     model.eval()
     val_loss = 0.0
     velocity_loss_total = 0.0
@@ -88,7 +100,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             acceleration_loss_total += normalized_acceleration_loss.item()
 
             # Save reconstruction for the first batch if needed
-            if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 0:
+            if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 6:
                 save_reconstruction_npz(
                     markers=masked_clip,
                     reconstructed_markers=outputs,
@@ -109,24 +121,26 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
         0.1 * avg_acceleration_loss
     )
 
-    wandb.log({
-        "Validation Loss (Reconstruction)": avg_rec_loss,
-        "Validation Loss (Velocity)": avg_velocity_loss,
-        "Validation Loss (Acceleration)": avg_acceleration_loss,
-        "Validation Loss (Total)": total_loss,
-    })
+    if is_rank_0:
+        wandb.log({
+            "Validation Loss (Reconstruction)": avg_rec_loss,
+            "Validation Loss (Velocity)": avg_velocity_loss,
+            "Validation Loss (Acceleration)": avg_acceleration_loss,
+            "Validation Loss (Total)": total_loss,
+        })
 
     return total_loss
 
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
+    is_rank_0 = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     model.train()
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
         velocity_loss_total = 0.0
         acceleration_loss_total = 0.0  # Track acceleration loss for the epoch
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}") if is_rank_0 else train_loader
 
         for masked_clip, mask, original_clip in progress_bar:
             masked_clip = masked_clip.to(DEVICE)
@@ -180,20 +194,20 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             acceleration_loss_total += normalized_acceleration_loss.item()
 
             # Log training metrics
-            progress_bar.set_postfix({
-                "Reconstruction Loss": normalized_rec_loss.item(),
-                "Velocity Loss": normalized_velocity_loss.item(),
-                "Acceleration Loss": normalized_acceleration_loss.item(),
-                "Total Loss": total_loss.item()
-            })
+            if is_rank_0:
+                progress_bar.set_postfix({
+                    "Reconstruction Loss": normalized_rec_loss.item(),
+                    "Velocity Loss": normalized_velocity_loss.item(),
+                    "Acceleration Loss": normalized_acceleration_loss.item(),
+                    "Total Loss": total_loss.item()
+                })
 
-            wandb.log({
-                "Training Loss (Reconstruction)": normalized_rec_loss.item(),
-                "Training Loss (Velocity)": normalized_velocity_loss.item(),
-                "Training Loss (Acceleration)": normalized_acceleration_loss.item(),
-                "Training Loss (Batch Total)": total_loss.item(),
-            })
-
+                wandb.log({
+                    "Training Loss (Reconstruction)": normalized_rec_loss.item(),
+                    "Training Loss (Velocity)": normalized_velocity_loss.item(),
+                    "Training Loss (Acceleration)": normalized_acceleration_loss.item(),
+                    "Training Loss (Batch Total)": total_loss.item(),
+                })
         # Log average training losses for the epoch
         avg_epoch_rec_loss = epoch_loss / len(train_loader)
         avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
@@ -221,6 +235,9 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
         })
 
         if (epoch + 1) % VALIDATE_EVERY == 0:
+            save_checkpoint(model, optimizer, epoch + 1, checkpoint_dir)
+
+        if (epoch + 1) % VALIDATE_EVERY == 0:
             save_dir = os.path.join(checkpoint_dir, "reconstruction_val")
             val_loss = validate(
                 model,
@@ -237,7 +254,9 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
 
 if __name__ == "__main__":
     import torch.multiprocessing as mp
+
     mp.set_start_method("spawn", force=True)
+
     # Argument parser
     parser = argparse.ArgumentParser(description='Train TemporalTransformer')
     parser.add_argument('--exp_name', type=str, required=True, help='Experiment name')
@@ -247,6 +266,7 @@ if __name__ == "__main__":
     checkpoint_dir = os.path.join('temporal_log', exp_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Logging setup
     log_file = os.path.join(checkpoint_dir, 'training.log')
     logging.basicConfig(
         level=logging.INFO,
@@ -259,7 +279,25 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger()
 
+    # WandB initialization
     wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name)
+
+    wandb_config = {
+        "BATCH_SIZE": BATCH_SIZE,
+        "EPOCHS": EPOCHS,
+        "LEARNING_RATE": LEARNING_RATE,
+        "MASK_RATIO": MASK_RATIO,
+        "DEVICE": str(DEVICE),  # Convert device object to string
+        "CLIP_SECONDS": CLIP_SECONDS,
+        "CLIP_FPS": CLIP_FPS,
+        "MARKERS_TYPE": MARKERS_TYPE,
+        "MODE": MODE,
+        "SMPLX_MODEL_PATH": SMPLX_MODEL_PATH,
+        "STRIDE": STRIDE
+    }
+
+    # Log the configuration to WandB
+    wandb.config.update(wandb_config)
 
     log_dir = os.path.join('./temporal_log', exp_name)
 
@@ -306,10 +344,10 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # To determine num_joints dynamically from the dataset:
-    # Grab a single sample
     sample_masked_clip, sample_mask, sample_original_clip = train_dataset[0]
     num_joints = sample_masked_clip.shape[1]
 
+    # Model setup
     model = TemporalTransformer(
         dim_in=3,
         dim_out=3,
@@ -327,7 +365,10 @@ if __name__ == "__main__":
     num_params = count_learnable_parameters(model)
     logger.info(f"Number of learnable parameters in TemporalTransformer: {num_params:,}")
 
+    # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
     # Start training
     train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir)
+
+
