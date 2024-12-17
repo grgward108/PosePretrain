@@ -116,7 +116,7 @@ def save_reconstruction_npz(joints, reconstructed_markers, original_markers, sav
     print(f"Saved reconstruction data to {npz_path}")
 
 
-def validate(model, dataloader, epoch, logger, DEVICE):
+def validate(model, dataloader, epoch, logger, DEVICE, SAVE_DIR):
     model.eval()
     epoch_loss = 0.0
 
@@ -134,7 +134,7 @@ def validate(model, dataloader, epoch, logger, DEVICE):
             epoch_loss += loss.item()
 
             if batch_idx == 0:
-                save_reconstruction_npz(joints, reconstructed_markers, original_markers, 'liftup_log', epoch)
+                save_reconstruction_npz(joints, reconstructed_markers, original_markers, SAVE_DIR, epoch)
 
     avg_loss = epoch_loss / len(dataloader)
     logger.info(f"Validation Loss: {avg_loss:.8f}")
@@ -221,7 +221,7 @@ def main(exp_name):
 
         # Validation
         if (epoch + 1) % 2 == 0:
-            val_loss = validate(model, val_loader, epoch, logger, DEVICE)
+            val_loss = validate(model, val_loader, epoch, logger, DEVICE, SAVE_DIR)
             wandb.log({"epoch": epoch + 1, "training_loss": train_loss, "validation_loss": val_loss})
 
             if val_loss < best_val_loss:
