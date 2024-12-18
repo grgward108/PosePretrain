@@ -610,7 +610,7 @@ class GRAB_DataLoader(data.Dataset):
     def __getitem__(self, index):
         if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
             clip_img = self.clip_img_list[index]  # [T, d] d dims of body representation
-            clip_img = torch.from_numpy(clip_img).float().permute(2, 1, 0).unsqueeze(0) 
+            clip_img = torch.from_numpy(clip_img).float().permute(2, 1, 0)
         elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
             clip_img = self.clip_img_list[index]  # [4, T, d]
             clip_img = torch.from_numpy(clip_img).float().permute(0, 2, 1)  # [4, d, T]
