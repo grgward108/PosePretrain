@@ -180,7 +180,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
         logger.info(f"Epoch {epoch+1}/{EPOCHS} Loss: {avg_epoch_loss:.4f}")
         wandb.log({"Training Loss": avg_epoch_loss, "Epoch": epoch + 1})
 
-        # Validate every few epochs (optional)
+        # Validate every 5 epochs
         if (epoch + 1) % 5 == 0:
             save_dir = os.path.join(checkpoint_dir, "validation_reconstructions")
             val_loss = validate(
@@ -190,6 +190,16 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             )
             logger.info(f"Epoch {epoch+1} Validation Loss: {val_loss:.4f}")
             wandb.log({"Validation Loss": val_loss, "Epoch": epoch + 1})
+
+            # Save checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch + 1}.pth")
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_epoch_loss,
+            }, checkpoint_path)
+            logger.info(f"Checkpoint saved at {checkpoint_path}")
 
             
 

@@ -9,6 +9,8 @@ import wandb
 from TemporalTransformer.models.models import TemporalTransformer
 from tqdm import tqdm
 import torch.optim as optim
+from PoseBridge.data.preprocessed_dataloader import PreprocessedMotionLoader
+
 
 BATCH_SIZE = 16
 EPOCHS = 100
@@ -22,7 +24,7 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 25
-TEMPORAL_CHECKPOINT_PATH = 'temporal_pretrained/epoch_16_checkpoint.pth'
+TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_16_checkpoint.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
@@ -32,7 +34,7 @@ markers_type = 'f15_p22'  # Example markers type
 mode = 'local_joints_3dv' 
 VALIDATE_EVERY = 5
 
-def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch):
+def save_reconstruction_npz(markers, reconstructed_markers, original_markers, mask, save_dir, epoch, exp_name):
     os.makedirs(save_dir, exist_ok=True)
     masked = markers.cpu().numpy()
     reconstructed = reconstructed_markers.cpu().numpy()
@@ -44,20 +46,14 @@ def save_reconstruction_npz(markers, reconstructed_markers, original_markers, ma
     else:
         mask_np = None  # No mask to save
 
-    npz_path = os.path.join(save_dir, f"epoch_{epoch}_reconstruction.npz")
+    npz_path = os.path.join(save_dir, f"finetune_temporal_{exp_name}_epoch_{epoch}_reconstruction.npz")
     np.savez_compressed(npz_path, masked=masked, reconstructed=reconstructed, ground_truth=ground_truth, mask=mask_np)
     print(f"Saved reconstruction data to {npz_path}")
-
-def generate_static_mask(length=61):
-    mask = torch.ones(length, dtype=torch.float32)
-    mask[0] = 0 # First frame unmasked
-    mask[-1] = 0  # Last frame unmasked
-    return mask
 
 def count_learnable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def validate(model, val_loader, device, save_reconstruction=False, save_dir=None, epoch=None):
+def validate(model, val_loader, device, save_reconstruction=False, save_dir=None, epoch=None, exp_name=None):
     model.eval()
     val_loss = 0.0
     velocity_loss_total = 0.0
@@ -69,7 +65,7 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
     leg_indices = [1, 2, 4, 5, 7, 8, 10, 11]
 
     with torch.no_grad():
-        for i, (clip_img, slerp_img, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
+        for i, (clip_img, _, slerp_img, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
             original_clip = clip_img.to(device)
             slerp_img = slerp_img.to(device)
 
@@ -115,7 +111,8 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
                     original_markers=original_clip,
                     mask=None,  # Mask is not used
                     save_dir=save_dir,
-                    epoch=epoch
+                    epoch=epoch,
+                    exp_name=exp_name
                 )
                 first_batch_saved = True
 
@@ -141,7 +138,7 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
 
     return total_loss
 
-def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
+def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, exp_name):
     model.train()
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
@@ -150,7 +147,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
         leg_loss_total = 0.0  # Track leg-specific reconstruction loss
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
-        for clip_img, slerp_img, mask, *_ in progress_bar:
+        for clip_img, _, slerp_img, *_ in progress_bar:
             original_clip = clip_img.to(DEVICE)
             original_clip = original_clip.permute(0, 3, 2, 1)
             slerp_img = slerp_img.to(DEVICE)
@@ -273,7 +270,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                 device=DEVICE,
                 save_reconstruction=True,  # Enable saving reconstruction
                 save_dir=save_dir,
-                epoch=epoch + 1
+                epoch=epoch + 1,
+                exp_name=exp_name
             )
             logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Validation Loss: {val_loss:.4f}")
             wandb.log({"Validation Loss": val_loss, "Epoch": epoch + 1})
@@ -313,7 +311,7 @@ if __name__ == "__main__":
     logger.info(f"Markers Type: {MARKERS_TYPE}")
     logger.info(f"Device: {DEVICE}")
 
-    wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name)
+    wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name, mode='disabled')
     wandb.config.update({
         "experiment_name": exp_name,
         "batch_size": BATCH_SIZE,
@@ -327,20 +325,16 @@ if __name__ == "__main__":
         "device": DEVICE.type,
     })
 
-    train_dataset = GRAB_DataLoader(clip_seconds=2, clip_fps=30, mode=mode, markers_type=markers_type)
-    train_dataset.read_data(train_datasets, grab_dir)
+    grab_dir = '../../../data/edwarde/dataset/preprocessed_grab'
+    train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
+    test_datasets = ['s9', 's10']
 
-    """143 markers / 55 joints if with_hand else 72 markers / 25 joints"""
-    train_dataset.create_body_repr(with_hand=False, smplx_model_path=smplx_model_path)
+    # Initialize Dataset and DataLoaders
+    train_dataset = PreprocessedMotionLoader(grab_dir, train_datasets)
+    val_dataset = PreprocessedMotionLoader(grab_dir, test_datasets)
 
-    val_dataset = GRAB_DataLoader(clip_seconds=2, clip_fps=30, mode=mode, markers_type=markers_type)
-    val_dataset.read_data(test_datasets, grab_dir)
-
-    """143 markers / 55 joints if with_hand else 72 markers / 25 joints"""
-    val_dataset.create_body_repr(with_hand=False, smplx_model_path=smplx_model_path)
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
 
     model = TemporalTransformer(
         dim_in=3,
@@ -378,5 +372,5 @@ if __name__ == "__main__":
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
     # Start training
-    train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir)
+    train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, exp_name)
 
