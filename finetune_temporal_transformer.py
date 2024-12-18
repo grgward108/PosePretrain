@@ -22,7 +22,7 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 25
-TEMPORAL_CHECKPOINT_PATH = 'temporal_pretrained/epoch_15.pth'
+TEMPORAL_CHECKPOINT_PATH = 'temporal_pretrained/epoch_16_checkpoint.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
@@ -159,37 +159,45 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             outputs = model(slerp_img)
 
             # Define leg indices
-            leg_indices = [1, 2, 4, 5, 7, 8, 10, 11]
+            leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
-            # Create weight tensor
-            weights = torch.ones_like(outputs)  # Default weight of 1 for all joints
-            weights[:, :, leg_indices, :] *= 2.0  # Double the weight for leg joints
+            # Create weight tensor (double the weight for leg joints)
+            weights = torch.ones_like(outputs)  
+            weights[:, :, leg_indices, :] *= 2.0  
 
             # Weighted reconstruction loss
             weighted_rec_loss = ((outputs - original_clip) ** 2 * weights).sum() / weights.sum()
 
-            # Leg-specific reconstruction loss (for logging)
-            leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
-            leg_loss_total += leg_loss.item()
-
-            # Compute velocity loss
+            # Compute velocity (1st derivative)
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
             reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
             velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]
             weighted_velocity_loss = velocity_diff.sum() / weights[:, :, :, 1:].sum()
 
-            # Compute acceleration loss
+            # Compute acceleration (2nd derivative)
             original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
             reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
             acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
             weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
 
+            # Compute jerk loss (3rd derivative)
+            original_jerk = original_acceleration[:, :, :, 1:] - original_acceleration[:, :, :, :-1]
+            reconstructed_jerk = reconstructed_acceleration[:, :, :, 1:] - reconstructed_acceleration[:, :, :, :-1]
+            jerk_diff = (original_jerk - reconstructed_jerk) ** 2 * weights[:, :, :, 3:]
+            weighted_jerk_loss = jerk_diff.sum() / weights[:, :, :, 3:].sum()
+
+            # Leg-specific reconstruction loss (for logging)
+            leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
+            leg_loss_total += leg_loss.item()
+
             # Combine losses
             total_loss = (
-                0.7 * weighted_rec_loss +
+                0.6 * weighted_rec_loss +
                 0.2 * weighted_velocity_loss +
-                0.1 * weighted_acceleration_loss
+                0.1 * weighted_acceleration_loss +
+                0.1 * weighted_jerk_loss  # Add jerk loss
             )
+
 
             # Backward pass and optimization
             optimizer.zero_grad()
@@ -348,10 +356,20 @@ if __name__ == "__main__":
     if os.path.exists(TEMPORAL_CHECKPOINT_PATH):
         logger.info(f"Loading model from checkpoint: {TEMPORAL_CHECKPOINT_PATH}")
         checkpoint = torch.load(TEMPORAL_CHECKPOINT_PATH, map_location=DEVICE)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Fix keys with "module." prefix
+        state_dict = checkpoint['model_state_dict']
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            new_key = key.replace("module.", "")  # Remove "module." prefix
+            new_state_dict[new_key] = value
+
+        # Load the cleaned state_dict
+        model.load_state_dict(new_state_dict)
         logger.info("Checkpoint loaded successfully.")
     else:
         logger.warning(f"Checkpoint not found at {TEMPORAL_CHECKPOINT_PATH}. Training from scratch.")
+
 
     num_params = count_learnable_parameters(model)
     logger.info(f"Number of learnable parameters in TemporalTransformer: {num_params:,}")
