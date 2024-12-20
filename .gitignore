@@ -13,3 +13,5 @@ finetune_temporal_log/
 temporal_pretrained/
 posebridge_log/
 finetune_liftup_log/
+inference_posebridge/
+test_02/
