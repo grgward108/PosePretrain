@@ -30,8 +30,6 @@ NUM_JOINTS = 22
 NUM_MARKERS = 143
 VALIDATE_EVERY = 5
 
-TEMPORAL_CHECKPOINT_PATH = "temporal_pretrained/epoch_16_checkpoint.pth"
-LIFTUP_CHECKPOINT_PATH = "liftup_log/test3/ckpt/best_model_epoch_22.pth"
 
 grab_dir = '../../../data/edwarde/dataset/preprocessed_grab'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
@@ -39,32 +37,33 @@ test_datasets = ['s9', 's10']
 
 #save the infilled joints, lifted markers, original joints, original markers, slerp input in an npz file
 
-def save_reconstuction_npz(slerp_img, temp_filled_joints, temp_original_joints, lift_predicted_markers,  lift_original_markers, save_dir, epoch, exp_name):
+def save_reconstruction_npz(slerp_img, temp_filled_joints, temp_original_joints, lift_predicted_markers,  lift_original_markers, traj_gt, rot_0_pivot, transf_matrix_smplx, joint_start, save_dir, epoch, exp_name):
     save_path = os.path.join(save_dir, exp_name)
     os.makedirs(save_path, exist_ok=True) 
-    np.savez_compressed(os.path.join(save_path, f"{exp_name}_reconstruction_epoch_{epoch}.npz"),
+    np.savez_compressed(os.path.join(save_path, f"e2e_finetune_{exp_name}_reconstruction_epoch_{epoch+1}.npz"),
              slerp_img=slerp_img.cpu().numpy(),
              temp_filled_joints=temp_filled_joints.cpu().numpy(),
              temp_original_joints=temp_original_joints.cpu().numpy(),
              lift_predicted_markers=lift_predicted_markers.cpu().numpy(),
-             lift_original_markers=lift_original_markers.cpu().numpy()
+             lift_original_markers=lift_original_markers.cpu().numpy(),
+             traj_gt=traj_gt.cpu().numpy(),
+             rot_0_pivot=rot_0_pivot.cpu().numpy(),
+             transf_matrix_smplx=transf_matrix_smplx.cpu().numpy(),
+             joint_start=joint_start.cpu().numpy()
              )
-    print(f"Reconstruction saved at {os.path.join(save_path, f'{exp_name}_reconstruction_epoch_{epoch}.npz')}")
+    print(f"Reconstruction saved at {os.path.join(save_path, f'{exp_name}_reconstruction_epoch_{epoch+1}.npz')}")
     
-
-
 
 def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
     model.train()
     epoch_loss = 0.0
-    velocity_loss_total = 0.0
-    acceleration_loss_total = 0.0
-    leg_loss_total = 0.0
+    num_batches = len(dataloader)
 
-    # Define leg joint indices (adjust as per your data)
+    # Define leg and hand indices
     leg_joint_indices = [1, 2, 4, 5, 7, 8, 10, 11]
-    
-    for clip_img_joints, clip_img_markers, slerp_img, *_ in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
+    right_hand_indices = torch.cat([torch.arange(64, 79), torch.arange(121, 143)]).to(DEVICE)
+
+    for clip_img_joints, clip_img_markers, slerp_img, traj, *_ in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
         slerp_img = slerp_img.to(DEVICE, dtype=torch.float32)
         temp_original_joints = clip_img_joints.to(DEVICE, dtype=torch.float32)
         lift_original_markers = clip_img_markers.to(DEVICE, dtype=torch.float32)
@@ -75,40 +74,36 @@ def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
         # Align dimensions
         temp_original_joints = temp_original_joints.permute(0, 3, 2, 1)  # [B, C, J, T]
         
-        # Weighted Reconstruction Loss
-        weights = torch.ones_like(temp_filled_joints)  # Default weight = 1
-        weights[:, :, leg_joint_indices, :] *= 2.0  # Double weight for leg joints
+        ############################ Temporal Transformer Loss ############################
+        weights = torch.ones_like(temp_filled_joints).to(DEVICE)
+        weights[:, :, leg_joint_indices, :] *= 3.0
         weighted_rec_loss = ((temp_filled_joints - temp_original_joints) ** 2 * weights).sum() / weights.sum()
 
         # Velocity Loss
         original_velocity = temp_original_joints[:, :, :, 1:] - temp_original_joints[:, :, :, :-1]
         reconstructed_velocity = temp_filled_joints[:, :, :, 1:] - temp_filled_joints[:, :, :, :-1]
-        velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]
-        weighted_velocity_loss = velocity_diff.sum() / weights[:, :, :, 1:].sum()
+        weighted_velocity_loss = ((original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]).sum() / weights[:, :, :, 1:].sum()
 
         # Acceleration Loss
         original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
         reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
-        acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
-        weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
+        weighted_acceleration_loss = ((original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]).sum() / weights[:, :, :, 2:].sum()
 
-        # Leg-Specific Loss (for logging)
-        leg_loss = ((temp_filled_joints[:, :, leg_joint_indices, :] - temp_original_joints[:, :, leg_joint_indices, :]) ** 2).mean()
-        leg_loss_total += leg_loss.item()
-
-        # Combine Temporal Losses
+        # Temporal Loss
         temporal_loss = (
-            0.5 * weighted_rec_loss +
+            0.6 * weighted_rec_loss +
             0.3 * weighted_velocity_loss +
-            0.2 * weighted_acceleration_loss
+            0.1 * weighted_acceleration_loss
         )
 
-        # LiftUp Transformer Loss (same as before)
+        ############################ Lift-Up Transformer Loss ############################
         lift_original_markers = lift_original_markers.permute(0, 3, 2, 1)  # [B, C, M, T]
-        loss_liftup = 0
+        weights = torch.ones_like(lift_predicted_markers).to(DEVICE)
+        weights[:, :, right_hand_indices, :] *= 2.0
+        lift_loss = ((lift_predicted_markers - lift_original_markers) ** 2 * weights).sum() / weights.sum()
 
         # Total Loss
-        total_loss = temporal_loss + loss_liftup
+        total_loss = 0.6 * temporal_loss + 0.4 * lift_loss
 
         # Backpropagation
         optimizer.zero_grad()
@@ -117,61 +112,103 @@ def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
 
         # Track Epoch Losses
         epoch_loss += total_loss.item()
-        velocity_loss_total += weighted_velocity_loss.item()
-        acceleration_loss_total += weighted_acceleration_loss.item()
+        
+    avg_epoch_loss = epoch_loss / num_batches
+    logger.info(
+        f"Epoch {epoch + 1}: Temporal Loss: {temporal_loss:.4f}, "
+        f"Lift-Up Loss: {lift_loss:.4f}, Total Loss: {avg_epoch_loss:.4f}"
+    )
+
+    return avg_epoch_loss  # Return average loss for the epoch
+
+
 
 
 def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_name="default"):
     model.eval()
     val_loss = 0.0
+    velocity_loss_total = 0.0
+    acceleration_loss_total = 0.0
+    temporal_loss_total = 0.0
+    lift_loss_total = 0.0
     first_batch_saved = False  # Flag to ensure we only save the first batch
 
+    # Define leg and hand indices
+    leg_joint_indices = [1, 2, 4, 5, 7, 8, 10, 11]
+    right_hand_indices = torch.cat([torch.arange(64, 79), torch.arange(121, 143)]).to(DEVICE)
+
     with torch.no_grad():
-        for clip_img_joints, clip_img_markers, slerp_img, *_ in tqdm(dataloader, desc="Validating"):
+        for clip_img_joints, clip_img_markers, slerp_img, traj_gt, smplx_beta, gender, rot_0_pivot, transf_matrix_smplx, smplx_params_gt, marker_start, marker_end, joint_start, joint_end in tqdm(dataloader, desc="Validating"):
             slerp_img = slerp_img.to(DEVICE, dtype=torch.float32)
             temp_original_joints = clip_img_joints.to(DEVICE, dtype=torch.float32)
             lift_original_markers = clip_img_markers.to(DEVICE, dtype=torch.float32)
 
             # Forward Pass
             temp_filled_joints, lift_predicted_markers = model(slerp_img)
-            
+
             # Align dimensions (same as training)
-            temp_original_joints = temp_original_joints.permute(0, 3, 2, 1)  # Swap frames and coordinates
-            lift_original_markers = lift_original_markers.permute(0, 3, 2, 1)  # Swap frames and coordinates
-            
-            print("Lift Predicted Markers Output:", lift_predicted_markers.shape)
-            print("Lift Predicted Markers Sample:", lift_predicted_markers[0, 0]) 
+            temp_original_joints = temp_original_joints.permute(0, 3, 2, 1)  # [B, C, J, T]
+            lift_original_markers = lift_original_markers.permute(0, 3, 2, 1)  # [B, C, M, T]
 
-            # Temporal Transformer Loss
-            loss_temporal = nn.MSELoss()(temp_filled_joints, temp_original_joints)
+            ############################ Temporal Transformer Loss ############################
+            weights = torch.ones_like(temp_filled_joints).to(DEVICE)
+            weights[:, :, leg_joint_indices, :] *= 3.0
+            weighted_rec_loss = ((temp_filled_joints - temp_original_joints) ** 2 * weights).sum() / weights.sum()
 
-            # LiftUp Transformer Loss
-            loss_liftup = nn.MSELoss()(lift_predicted_markers, lift_original_markers)
-            
-            print(f"Loss Temporal: {loss_temporal.item()}, Loss LiftUp: {loss_liftup.item()}")
+            # Velocity Loss
+            original_velocity = temp_original_joints[:, :, :, 1:] - temp_original_joints[:, :, :, :-1]
+            reconstructed_velocity = temp_filled_joints[:, :, :, 1:] - temp_filled_joints[:, :, :, :-1]
+            weighted_velocity_loss = ((original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]).sum() / weights[:, :, :, 1:].sum()
 
+            # Acceleration Loss
+            original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
+            reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
+            weighted_acceleration_loss = ((original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]).sum() / weights[:, :, :, 2:].sum()
 
-            # Combine Losses
-            total_loss = loss_temporal + loss_liftup
+            # Temporal Loss
+            temporal_loss = (
+                0.6 * weighted_rec_loss +
+                0.3 * weighted_velocity_loss +
+                0.1 * weighted_acceleration_loss
+            )
+            temporal_loss_total += temporal_loss.item()
+
+            ############################ LiftUp Transformer Loss ############################
+            weights = torch.ones_like(lift_predicted_markers).to(DEVICE)
+            weights[:, :, right_hand_indices, :] *= 2.0
+            lift_loss = ((lift_predicted_markers - lift_original_markers) ** 2 * weights).sum() / weights.sum()
+            lift_loss_total += lift_loss.item()
+
+            # Total Loss
+            total_loss = 0.6 * temporal_loss + 0.4 * lift_loss
             val_loss += total_loss.item()
 
             # Save reconstruction for the first batch only
-            if not first_batch_saved:
-                save_reconstuction_npz(
+            if not first_batch_saved and save_dir is not None:
+                save_reconstruction_npz(
                     slerp_img=slerp_img[0],  # Save only the first sequence in the batch
                     temp_filled_joints=temp_filled_joints[0],
                     temp_original_joints=temp_original_joints[0],
                     lift_predicted_markers=lift_predicted_markers[0],
                     lift_original_markers=lift_original_markers[0],
+                    traj_gt=traj_gt[0],
+                    rot_0_pivot=rot_0_pivot[0],
+                    transf_matrix_smplx=transf_matrix_smplx[0],
+                    joint_start=joint_start[0],
                     save_dir=save_dir,
                     epoch=epoch,
                     exp_name=exp_name
                 )
-                first_batch_saved = True  # Set flag to True after saving
+                first_batch_saved = True
 
-    avg_loss = val_loss / len(dataloader)
-    print(f"Validation Loss: {avg_loss:.8f}")
-    return avg_loss
+    # Compute average validation loss
+    avg_val_loss = val_loss / len(dataloader)
+    avg_temporal_loss = temporal_loss_total / len(dataloader)
+    avg_lift_loss = lift_loss_total / len(dataloader)
+
+    print(f"Validation - Total Loss: {avg_val_loss:.4f}, Temporal Loss: {avg_temporal_loss:.4f}, Lift Loss: {avg_lift_loss:.4f}")
+    return avg_val_loss
+
 
 
 def main(exp_name):
@@ -206,7 +243,7 @@ def main(exp_name):
             "num_markers": NUM_MARKERS,
             "device": DEVICE.type
         },
-        mode = 'disabled'
+        mode='disabled'
     )
 
     logger.info("Training Configuration:")
@@ -244,6 +281,27 @@ def main(exp_name):
         num_heads=4,
     ).to(DEVICE)
 
+    # Load Pre-Trained Checkpoints
+    temporal_checkpoint_path = 'finetune_temporal_log/test7_addjerkloss_changedataloader/epoch_45.pth'
+    liftup_checkpoint_path ='finetune_liftup_log/test3/epoch_100.pth' 
+
+    if os.path.exists(temporal_checkpoint_path):
+        logger.info(f"Loading TemporalTransformer from checkpoint: {temporal_checkpoint_path}")
+        temporal_checkpoint = torch.load(temporal_checkpoint_path, map_location=DEVICE)
+        temporal_transformer.load_state_dict(temporal_checkpoint['model_state_dict'])
+        logger.info("TemporalTransformer checkpoint loaded successfully.")
+    else:
+        logger.warning(f"TemporalTransformer checkpoint not found at {temporal_checkpoint_path}. Training from scratch.")
+
+    if os.path.exists(liftup_checkpoint_path):
+        logger.info(f"Loading LiftUpTransformer from checkpoint: {liftup_checkpoint_path}")
+        liftup_checkpoint = torch.load(liftup_checkpoint_path, map_location=DEVICE)
+        liftup_transformer.load_state_dict(liftup_checkpoint['model_state_dict'])
+        logger.info("LiftUpTransformer checkpoint loaded successfully.")
+    else:
+        logger.warning(f"LiftUpTransformer checkpoint not found at {liftup_checkpoint_path}. Training from scratch.")
+
+    # Combine Models
     model = EndToEndModel(temporal_transformer, liftup_transformer).to(DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
@@ -252,7 +310,6 @@ def main(exp_name):
     # Best validation loss tracking
     best_val_loss = float('inf')
 
-    # Training Loop
     # Training Loop
     for epoch in range(NUM_EPOCHS):
         logger.info(f"Starting Epoch {epoch + 1}/{NUM_EPOCHS}")
@@ -286,9 +343,6 @@ def main(exp_name):
 
         # Step the scheduler
         scheduler.step()
-
-
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PoseBridge Training Script")
