@@ -1,52 +1,168 @@
 import torch
+from GlobalTrajectory.data.dataloader import PreprocessedMotionLoader
+from GlobalTrajectory.models.models import Traj_MLP_CVAE
+import numpy as np
+from torch.utils.data import DataLoader
+import os
+import argparse
+import logging
 
+# Constants for training
+BATCH_SIZE = 16
+NUM_EPOCHS = 100
+LEARNING_RATE = 3e-5
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+VALIDATE_EVERY = 5
 
-def get_forward_joint(joint_start):
-	""" Joint_start: [B, N, 3] in xyz """
-	x_axis = joint_start[:, 2, :] - joint_start[:, 1, :]
-	x_axis[:, -1] = 0
-	x_axis = x_axis / torch.norm(x_axis, dim=-1).unsqueeze(1)
-	z_axis = torch.tensor([0, 0, 1]).float().unsqueeze(0).repeat(len(x_axis), 1).to(device)
-	y_axis = torch.cross(z_axis, x_axis)
-	y_axis = y_axis / torch.norm(y_axis, dim=-1).unsqueeze(1)
-	transf_rotmat = torch.stack([x_axis, y_axis, z_axis], dim=1)
-	return y_axis, transf_rotmat
+# Data configuration
+grab_dir = '../../../data/edwarde/dataset/preprocessed_grab'
+train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
+test_datasets = ['s9', 's10']
 
+# Function to save reconstructions
+def save_reconstruction_npz(traj_gt, predicted_traj, save_dir, exp_name, epoch):
+    save_path = os.path.join(save_dir, exp_name)
+    os.makedirs(save_path, exist_ok=True)
+    np.savez_compressed(os.path.join(save_path, f"reconstruction_epoch_{epoch}.npz"),
+                        traj_gt=traj_gt, 
+                        predicted_traj=predicted_traj)
 
-def prepare_traj_input(joint_start, joint_end):
-	""" Joints: [B, N, 3] in xyz """
-	B, N, _ = joint_start.shape
-	T = 62
-	joint_sr_input = torch.ones(B, 4, T)  # [B, xyr, T]
-	y_axis, transf_rotmat = get_forward_joint(joint_start)
-	joint_start_new = joint_start.clone()
-	joint_end_new = joint_end.clone()  # to check whether original joints change or not
-	joint_start_new = torch.matmul(joint_start - joint_start[:, 0:1], transf_rotmat)
-	joint_end_new = torch.matmul(joint_end - joint_start[:, 0:1], transf_rotmat)
+# Training function
+def train(model, optimizer, train_loader, epoch, logger, device):
+    model.train()
+    epoch_loss = 0
+    for i, data in enumerate(train_loader):
+        traj, marker_start_global, marker_end_global = data
+        traj = traj.to(device)
+        marker_start_global = marker_start_global.to(device)
+        marker_end_global = marker_end_global.to(device)
 
-	# start_forward, _ = get_forward_joint(joint_start_new)
-	start_forward = torch.tensor([0, 1, 0]).unsqueeze(0)
-	end_forward, _ = get_forward_joint(joint_end_new)
+        # Linear interpolation for pelvis marker (only x and y)
+        pelvis_start = marker_start_global[:, 0, :2]  # Shape: (batch_size, 2)
+        pelvis_end = marker_end_global[:, 0, :2]      # Shape: (batch_size, 2)
+        frames = traj.size(1)
+        interp_pelvis = torch.linspace(0, 1, frames).to(device).view(1, -1, 1) * (pelvis_end.unsqueeze(1) - pelvis_start.unsqueeze(1)) + pelvis_start.unsqueeze(1)
 
-	joint_sr_input[:, :2, 0] = joint_start_new[:, 0, :2]  # xy
-	joint_sr_input[:, :2, -1] = joint_end_new[:, 0, :2]   # xy
-	joint_sr_input[:, 2:, 0] = start_forward[:, :2]  # r
-	joint_sr_input[:, 2:, -1] = end_forward[:, :2]  # r
+        # Forward pass
+        pred, mu, logvar = model(interp_pelvis, marker_start_global)
 
+        # Compute loss
+        rec_loss = torch.nn.functional.mse_loss(pred, traj)
+        kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / traj.size(0)
+        loss = rec_loss + kld_loss
+        
+        #Compute Velocity Loss
+        traj_velocity = traj[:, 1:, :] - traj[:, :-1, :]
+        pred_velocity = pred[:, 1:, :] - pred[:, :-1, :]
+        velocity_loss = torch.nn.functional.mse_loss(pred_velocity, traj_velocity)
 
-	# normalize
-	traj_mean = torch.tensor(traj_stats['traj_Xmean']).unsqueeze(0).unsqueeze(2)
-	traj_std = torch.tensor(traj_stats['traj_Xstd']).unsqueeze(0).unsqueeze(2)
+        loss = rec_loss + kld_loss + velocity_loss
 
-	joint_sr_input_normed = (joint_sr_input - traj_mean) / traj_std
-	for t in range(joint_sr_input_normed.size(-1)):
-		joint_sr_input_normed[:, :, t] = joint_sr_input_normed[:, :, 0] + (joint_sr_input_normed[:, :, -1] - joint_sr_input_normed[:, :, 0])*t/(joint_sr_input_normed.size(-1)-1)
-		joint_sr_input_normed[:, -2:, t] = joint_sr_input_normed[:, -2:, t] / torch.norm(joint_sr_input_normed[:, -2:, t], dim=1).unsqueeze(1)
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-	for t in range(joint_sr_input.size(-1)):
-		joint_sr_input[:, :, t] = joint_sr_input[:, :, 0] + (joint_sr_input[:, :, -1] - joint_sr_input[:, :, 0])*t/(joint_sr_input.size(-1)-1)
-		joint_sr_input[:, -2:, t] = joint_sr_input[:, -2:, t] / torch.norm(joint_sr_input[:, -2:, t], dim=1).unsqueeze(1)
+        # Log loss
+        epoch_loss += loss.item()
+        logger.info(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Iteration [{i+1}/{len(train_loader)}] Loss: {loss.item():.8f}")
 
-	# linear interpolation
+    return epoch_loss / len(train_loader)
 
-	return joint_sr_input_normed.float().to(device), joint_sr_input.float().to(device), transf_rotmat, joint_start_new, joint_end_new
+# Validation function
+def validate(model, val_loader, device, save_dir, epoch, exp_name):
+    model.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for i, data in enumerate(val_loader):
+            traj, marker_start_global, marker_end_global = data
+            traj = traj.to(device)
+            marker_start_global = marker_start_global.to(device)
+            marker_end_global = marker_end_global.to(device)
+
+            # Linear interpolation for pelvis marker
+            pelvis_start = marker_start_global[:, 0, :2]  # Shape: (batch_size, 2)
+            pelvis_end = marker_end_global[:, 0, :2]      # Shape: (batch_size, 2)
+            frames = traj.size(1)
+            interp_pelvis = torch.linspace(0, 1, frames).to(device).view(1, -1, 1) * (pelvis_end.unsqueeze(1) - pelvis_start.unsqueeze(1)) + pelvis_start.unsqueeze(1)
+
+            # Forward pass
+            pred, mu, logvar = model(interp_pelvis, marker_start_global)
+
+            # Compute loss
+            rec_loss = torch.nn.functional.mse_loss(pred, traj)
+            kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / traj.size(0)
+
+            # Compute velocity loss
+            traj_velocity = traj[:, 1:, :] - traj[:, :-1, :]
+            pred_velocity = pred[:, 1:, :] - pred[:, :-1, :]
+            velocity_loss = torch.nn.functional.mse_loss(pred_velocity, traj_velocity)
+
+            loss = rec_loss + kld_loss + velocity_loss
+
+            val_loss += loss.item()
+
+            # Save reconstructions
+            if i == 0:  # Save only the first batch for visualization
+                save_reconstruction_npz(traj.cpu().numpy(), pred.cpu().numpy(), save_dir, exp_name, epoch)
+
+    return val_loss / len(val_loader)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PoseBridge Training Script")
+    parser.add_argument("--exp_name", required=True, help="Experiment name")
+    args = parser.parse_args()
+
+    SAVE_DIR = os.path.join('globaltrajectory_log', args.exp_name)
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(SAVE_DIR, f"{args.exp_name}.log")),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger()
+
+    # Prepare datasets
+    train_dataset = PreprocessedMotionLoader(grab_dir, train_datasets)
+    val_dataset = PreprocessedMotionLoader(grab_dir, test_datasets)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    # Define model
+    nz = 32
+    feature_dim = 64
+    T = 32
+    model = Traj_MLP_CVAE(nz, feature_dim, T).to(DEVICE)
+
+    # Define optimizer and scheduler
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+
+    best_val_loss = float('inf')
+
+    # Training loop
+    for epoch in range(NUM_EPOCHS):
+        logger.info(f"Starting Epoch {epoch + 1}/{NUM_EPOCHS}")
+
+        # Training
+        train_loss = train(model, optimizer, train_loader, epoch, logger, DEVICE)
+        logger.info(f"Epoch {epoch + 1} Training Loss: {train_loss:.8f}")
+
+        # Validation
+        if (epoch + 1) % VALIDATE_EVERY == 0 or epoch + 1 == NUM_EPOCHS:
+            val_loss = validate(model, val_loader, DEVICE, save_dir=SAVE_DIR, epoch=epoch, exp_name=args.exp_name)
+            logger.info(f"Epoch {epoch + 1} Validation Loss: {val_loss:.8f}")
+
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"best_model_epoch_{epoch + 1}.pth"))
+                logger.info(f"Best model saved at epoch {epoch + 1} with Validation Loss: {val_loss:.8f}")
+
+        # Step the scheduler
+        scheduler.step()
