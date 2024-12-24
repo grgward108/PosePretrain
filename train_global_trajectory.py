@@ -1,6 +1,6 @@
 import torch
 from GlobalTrajectory.data.dataloader import PreprocessedMotionLoader
-from GlobalTrajectory.models.models import Traj_MLP_CVAE
+from GlobalTrajectory.models.models import Traj_MLP
 import numpy as np
 from torch.utils.data import DataLoader
 import os
@@ -42,21 +42,20 @@ def train(model, optimizer, train_loader, epoch, logger, device):
         pelvis_end = marker_end_global[:, 0, :2]      # Shape: (batch_size, 2)
         frames = traj.size(1)
         interp_pelvis = torch.linspace(0, 1, frames).to(device).view(1, -1, 1) * (pelvis_end.unsqueeze(1) - pelvis_start.unsqueeze(1)) + pelvis_start.unsqueeze(1)
+        interp_pelvis = interp_pelvis.reshape(interp_pelvis.size(0), -1)  # Flatten to [batch_size, 124]
 
         # Forward pass
-        pred, mu, logvar = model(interp_pelvis, marker_start_global)
+        pred = model(interp_pelvis)
 
         # Compute loss
-        rec_loss = torch.nn.functional.mse_loss(pred, traj)
-        kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / traj.size(0)
-        loss = rec_loss + kld_loss
+        rec_loss = torch.nn.functional.mse_loss(pred, traj.reshape(traj.size(0), -1))
         
-        #Compute Velocity Loss
+        # Compute velocity loss
         traj_velocity = traj[:, 1:, :] - traj[:, :-1, :]
-        pred_velocity = pred[:, 1:, :] - pred[:, :-1, :]
+        pred_velocity = pred.reshape(traj.size(0), frames, 2)[:, 1:, :] - pred.reshape(traj.size(0), frames, 2)[:, :-1, :]
         velocity_loss = torch.nn.functional.mse_loss(pred_velocity, traj_velocity)
 
-        loss = rec_loss + kld_loss + velocity_loss
+        loss = rec_loss + velocity_loss
 
         # Backpropagation
         optimizer.zero_grad()
@@ -85,20 +84,20 @@ def validate(model, val_loader, device, save_dir, epoch, exp_name):
             pelvis_end = marker_end_global[:, 0, :2]      # Shape: (batch_size, 2)
             frames = traj.size(1)
             interp_pelvis = torch.linspace(0, 1, frames).to(device).view(1, -1, 1) * (pelvis_end.unsqueeze(1) - pelvis_start.unsqueeze(1)) + pelvis_start.unsqueeze(1)
+            interp_pelvis = interp_pelvis.reshape(interp_pelvis.size(0), -1)  # Flatten to [batch_size, 124]
 
             # Forward pass
-            pred, mu, logvar = model(interp_pelvis, marker_start_global)
+            pred = model(interp_pelvis)
 
             # Compute loss
-            rec_loss = torch.nn.functional.mse_loss(pred, traj)
-            kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / traj.size(0)
+            rec_loss = torch.nn.functional.mse_loss(pred, traj.reshape(traj.size(0), -1))
 
             # Compute velocity loss
             traj_velocity = traj[:, 1:, :] - traj[:, :-1, :]
-            pred_velocity = pred[:, 1:, :] - pred[:, :-1, :]
+            pred_velocity = pred.reshape(traj.size(0), frames, 2)[:, 1:, :] - pred.reshape(traj.size(0), frames, 2)[:, :-1, :]
             velocity_loss = torch.nn.functional.mse_loss(pred_velocity, traj_velocity)
 
-            loss = rec_loss + kld_loss + velocity_loss
+            loss = rec_loss + velocity_loss
 
             val_loss += loss.item()
 
@@ -109,7 +108,7 @@ def validate(model, val_loader, device, save_dir, epoch, exp_name):
     return val_loss / len(val_loader)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PoseBridge Training Script")
+    parser = argparse.ArgumentParser(description="Trajectory Training Script")
     parser.add_argument("--exp_name", required=True, help="Experiment name")
     args = parser.parse_args()
 
@@ -134,10 +133,10 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # Define model
-    nz = 32
-    feature_dim = 64
-    T = 32
-    model = Traj_MLP_CVAE(nz, feature_dim, T).to(DEVICE)
+    input_dim = 124  # 62 frames * 2 (x, y)
+    hidden_dim = 256
+    output_dim = 124  # Corrected trajectory (same shape as input)
+    model = Traj_MLP(input_dim, hidden_dim, output_dim).to(DEVICE)
 
     # Define optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
