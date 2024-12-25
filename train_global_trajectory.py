@@ -83,36 +83,35 @@ def validate(model, val_loader, device, save_dir, epoch, exp_name):
     total_batches = len(val_loader)
     with torch.no_grad():
         for i, data in enumerate(val_loader):
-            traj, joint_start, joint_end = data  # Assuming joint_start and joint_end are part of your data
+            traj, marker_start_global, marker_end_global = data  # Assuming marker_start_global and marker_end_global are part of your data
             traj = traj[:, :2, :].to(device)  # Take only x and y, shape [batch_size, 2, frames]
-            joint_start = joint_start.to(device)
-            joint_end = joint_end.to(device)
-            
-            print("Joint Start:", joint_start)
-            print("Joint End:", joint_end)
+            marker_start_global = marker_start_global.to(device)
+            marker_end_global = marker_end_global.to(device)
 
+            pelvis_start = marker_start_global[:, 0, :2]  # Shape: (batch_size, 2)
+            pelvis_end = marker_end_global[:, 0, :2]      # Shape: (batch_size, 2)
 
-            # Prepare joint_sr_input
-            joint_sr_input, _, _, _ = prepare_traj_input_without_stats(joint_start, joint_end, device)
+            # Subtract pelvis_start to normalize to zero
+            pelvis_end_normalized = pelvis_end - pelvis_start  # Shape: (batch_size, 2)
 
-            # Take only the x and y components (first two dimensions)
-            joint_sr_input_xy = joint_sr_input[:, :2, :]  # [batch_size, 2, frames]
+            # Number of frames
+            frames = 62  # Number of frames (adjust if needed)
 
-            # Flatten for the model input
-            model_input = joint_sr_input_xy.reshape(joint_sr_input_xy.size(0), -1)  # [batch_size, 2 * frames]
+            # Interpolate pelvis trajectory
+            interp_pelvis = torch.linspace(0, 1, frames).to(device).view(1, -1, 1) * (pelvis_end.unsqueeze(1) - pelvis_start.unsqueeze(1)) + pelvis_start.unsqueeze(1)
+            interp_pelvis = interp_pelvis.view(interp_pelvis.size(0), -1)  # Flatten to (batch_size, 124)
 
             # Forward pass
-            pred = model(model_input)  # Input the flattened x and y components
+            pred = model(interp_pelvis)  # Input the flattened x and y components
 
             # Compute loss
             rec_loss = torch.nn.functional.mse_loss(pred, traj.reshape(traj.size(0), -1))
 
             # Compute velocity loss
             traj_velocity = traj[:, :, 1:] - traj[:, :, :-1]  # [batch_size, 2, frames-1]
-            pred_velocity = pred.reshape(traj.size(0), traj.shape[2], 2)[:, 1:, :] - pred.reshape(traj.size(0), traj.shape[2], 2)[:, :-1, :]  # [batch_size, frames-1, 2]
+            pred_velocity = pred.reshape(traj.size(0), frames, 2)[:, 1:, :] - pred.reshape(traj.size(0), frames, 2)[:, :-1, :]  # [batch_size, frames-1, 2]
             velocity_loss = torch.nn.functional.mse_loss(pred_velocity, traj_velocity.permute(0, 2, 1))
 
-            # Combine losses
             loss = rec_loss + velocity_loss
 
             val_loss += loss.item()
@@ -122,7 +121,7 @@ def validate(model, val_loader, device, save_dir, epoch, exp_name):
                 save_reconstruction_npz(
                     traj.cpu().numpy(),
                     pred.cpu().numpy(),
-                    joint_sr_input_xy.cpu().numpy(),
+                    interp_pelvis.cpu().numpy(),
                     save_dir,
                     exp_name,
                     epoch
@@ -132,6 +131,7 @@ def validate(model, val_loader, device, save_dir, epoch, exp_name):
     avg_val_loss = val_loss / total_batches
     print(f"Epoch {epoch + 1}: Validation Loss = {avg_val_loss:.8f}")
     return avg_val_loss
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trajectory Training Script")
