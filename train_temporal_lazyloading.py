@@ -57,6 +57,8 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     val_loss = 0.0
     velocity_loss_total = 0.0
     acceleration_loss_total = 0.0
+    pelvis_loss_total = 0.0
+    foot_skating_loss_total = 0.0
     first_batch_saved = False
 
     with torch.no_grad():
@@ -80,6 +82,12 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             raw_rec_loss = unseen_loss.sum()
             normalized_rec_loss = raw_rec_loss / inverted_mask.sum()
 
+            # Higher weight for pelvis reconstruction
+            pelvis_output = unseen_outputs[:, 0:1, :]
+            pelvis_original = unseen_original[:, 0:1, :]
+            pelvis_loss = ((pelvis_output - pelvis_original) ** 2).sum() / inverted_mask.sum()
+            pelvis_loss_weighted = 5.0 * pelvis_loss
+
             # Velocity loss
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
             reconstructed_velocity = outputs[:, :, :, 1:] - outputs[:, :, :, :-1]
@@ -94,10 +102,24 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             raw_acceleration_loss = acceleration_diff.sum()
             normalized_acceleration_loss = raw_acceleration_loss / acceleration_diff.numel()
 
+            # Global context restoration for foot skating loss
+            global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
+            local_joints = outputs[:, 1:, :]  # Strip the pelvis
+            restored_joints = local_joints + global_translation  # Restore global context
+            restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
+
+            # Compute foot skating loss
+            feet_indices = [7, 10]  # Example indices for foot joints
+            foot_positions = restored_clip[:, :, feet_indices, :]
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+
             # Accumulate losses
             val_loss += normalized_rec_loss.item()
             velocity_loss_total += normalized_velocity_loss.item()
             acceleration_loss_total += normalized_acceleration_loss.item()
+            pelvis_loss_total += pelvis_loss_weighted.item()
+            foot_skating_loss_total += foot_skating_loss.item()
 
             # Save reconstruction for the first batch if needed
             if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 6:
@@ -115,21 +137,30 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
     avg_acceleration_loss = acceleration_loss_total / len(val_loader)
+    avg_pelvis_loss = pelvis_loss_total / len(val_loader)
+    avg_foot_skating_loss = foot_skating_loss_total / len(val_loader)
+
     total_loss = (
-        0.7 * avg_rec_loss + 
-        0.2 * avg_velocity_loss + 
-        0.1 * avg_acceleration_loss
+        0.5 * avg_rec_loss +
+        0.2 * avg_velocity_loss +
+        0.1 * avg_acceleration_loss +
+        0.1 * avg_pelvis_loss +
+        0.1 * avg_foot_skating_loss
     )
 
+    # Logging
     if is_rank_0:
         wandb.log({
             "Validation Loss (Reconstruction)": avg_rec_loss,
             "Validation Loss (Velocity)": avg_velocity_loss,
             "Validation Loss (Acceleration)": avg_acceleration_loss,
+            "Validation Loss (Pelvis)": avg_pelvis_loss,
+            "Validation Loss (Foot Skating)": avg_foot_skating_loss,
             "Validation Loss (Total)": total_loss,
         })
 
     return total_loss
+
 
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
@@ -138,7 +169,9 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
         velocity_loss_total = 0.0
-        acceleration_loss_total = 0.0  # Track acceleration loss for the epoch
+        acceleration_loss_total = 0.0
+        pelvis_loss_total = 0.0
+        foot_skating_loss_total = 0.0  # Track foot skating loss for the epoch
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}") if is_rank_0 else train_loader
 
@@ -157,7 +190,25 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             unseen_outputs = outputs * inverted_mask
             unseen_original = original_clip * inverted_mask
 
-            # Compute Reconstruction loss for masked elements
+            # Step 1: Higher weight for pelvis reconstruction
+            pelvis_output = unseen_outputs[:, 0:1, :]
+            pelvis_original = unseen_original[:, 0:1, :]
+            pelvis_loss = ((pelvis_output - pelvis_original) ** 2).sum() / inverted_mask.sum()
+            pelvis_loss_weighted = 5.0 * pelvis_loss  # Add higher weight for pelvis
+
+            # Step 2: Global context restoration for foot skating loss
+            global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
+            local_joints = outputs[:, 1:, :]  # Strip the pelvis
+            restored_joints = local_joints + global_translation  # Restore global context
+            restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
+
+            # Step 3: Compute foot skating loss
+            feet_indices = [7, 10]  # Example indices for feet joints (update as per your data)
+            foot_positions = restored_clip[:, :, feet_indices, :]  # Get foot positions
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Compute foot velocity
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+
+            # Step 4: Compute other losses
             unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
             raw_rec_loss = unseen_loss.sum()
             normalized_rec_loss = raw_rec_loss / inverted_mask.sum()
@@ -178,9 +229,11 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
 
             # Combine all losses
             total_loss = (
-                0.7 * normalized_rec_loss + 
+                0.5 * normalized_rec_loss + 
                 0.2 * normalized_velocity_loss + 
-                0.1 * normalized_acceleration_loss
+                0.1 * normalized_acceleration_loss +
+                0.1 * pelvis_loss_weighted +
+                0.1 * foot_skating_loss
             )
 
             # Backward pass and optimization
@@ -192,6 +245,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             epoch_loss += normalized_rec_loss.item()
             velocity_loss_total += normalized_velocity_loss.item()
             acceleration_loss_total += normalized_acceleration_loss.item()
+            pelvis_loss_total += pelvis_loss_weighted.item()
+            foot_skating_loss_total += foot_skating_loss.item()
 
             # Log training metrics
             if is_rank_0:
@@ -199,6 +254,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                     "Reconstruction Loss": normalized_rec_loss.item(),
                     "Velocity Loss": normalized_velocity_loss.item(),
                     "Acceleration Loss": normalized_acceleration_loss.item(),
+                    "Pelvis Loss": pelvis_loss_weighted.item(),
+                    "Foot Skating Loss": foot_skating_loss.item(),
                     "Total Loss": total_loss.item()
                 })
 
@@ -206,16 +263,22 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                     "Training Loss (Reconstruction)": normalized_rec_loss.item(),
                     "Training Loss (Velocity)": normalized_velocity_loss.item(),
                     "Training Loss (Acceleration)": normalized_acceleration_loss.item(),
+                    "Training Loss (Pelvis)": pelvis_loss_weighted.item(),
+                    "Training Loss (Foot Skating)": foot_skating_loss.item(),
                     "Training Loss (Batch Total)": total_loss.item(),
                 })
         # Log average training losses for the epoch
         avg_epoch_rec_loss = epoch_loss / len(train_loader)
         avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
         avg_epoch_acceleration_loss = acceleration_loss_total / len(train_loader)
+        avg_epoch_pelvis_loss = pelvis_loss_total / len(train_loader)
+        avg_epoch_foot_skating_loss = foot_skating_loss_total / len(train_loader)
         avg_epoch_total_loss = (
-            0.7 * avg_epoch_rec_loss + 
-            0.2 * avg_epoch_velocity_loss + 
-            0.1 * avg_epoch_acceleration_loss
+            0.5 * avg_epoch_rec_loss +
+            0.2 * avg_epoch_velocity_loss +
+            0.1 * avg_epoch_acceleration_loss +
+            0.1 * avg_epoch_pelvis_loss +
+            0.1 * avg_epoch_foot_skating_loss
         )
 
         logger.info(
@@ -223,6 +286,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             f"Reconstruction Loss: {avg_epoch_rec_loss:.4f}, "
             f"Velocity Loss: {avg_epoch_velocity_loss:.4f}, "
             f"Acceleration Loss: {avg_epoch_acceleration_loss:.4f}, "
+            f"Pelvis Loss: {avg_epoch_pelvis_loss:.4f}, "
+            f"Foot Skating Loss: {avg_epoch_foot_skating_loss:.4f}, "
             f"Total Loss: {avg_epoch_total_loss:.4f}"
         )
 
@@ -230,6 +295,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             "Training Loss (Epoch Reconstruction)": avg_epoch_rec_loss,
             "Training Loss (Epoch Velocity)": avg_epoch_velocity_loss,
             "Training Loss (Epoch Acceleration)": avg_epoch_acceleration_loss,
+            "Training Loss (Epoch Pelvis)": avg_epoch_pelvis_loss,
+            "Training Loss (Epoch Foot Skating)": avg_epoch_foot_skating_loss,
             "Training Loss (Epoch Total)": avg_epoch_total_loss,
             "Epoch": epoch + 1,
         })
