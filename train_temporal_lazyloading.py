@@ -109,7 +109,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
 
             # Compute foot skating loss
-            feet_indices = [7, 10]  # Example indices for foot joints
+            feet_indices = [7, 8, 10, 11] 
             foot_positions = restored_clip[:, :, feet_indices, :]
             foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
             foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
@@ -203,7 +203,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
 
             # Step 3: Compute foot skating loss
-            feet_indices = [7, 10]  # Example indices for feet joints (update as per your data)
+            feet_indices = [7, 8, 10, 11] 
             foot_positions = restored_clip[:, :, feet_indices, :]  # Get foot positions
             foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Compute foot velocity
             foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
