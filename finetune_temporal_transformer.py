@@ -14,7 +14,7 @@ from PoseBridge.data.preprocessed_dataloader import PreprocessedMotionLoader
 
 BATCH_SIZE = 16
 EPOCHS = 100
-LEARNING_RATE = 3e-4
+LEARNING_RATE = 3e-5
 MASK_RATIO = 0.15
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 CLIP_SECONDS = 2
@@ -23,8 +23,8 @@ MARKERS_TYPE = 'f15_p5'  # Not really used for joint extraction now, but keep co
 MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
-NUM_JOINTS = 25
-TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_16_checkpoint.pth'
+NUM_JOINTS = 26 # change to 26 because we add one more pelvis global joint
+TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_pretrained_globalpelvis.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
@@ -59,6 +59,8 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
     velocity_loss_total = 0.0
     acceleration_loss_total = 0.0
     leg_loss_total = 0.0
+    pelvis_loss_total = 0.0
+    foot_skating_loss_total = 0.0
     first_batch_saved = False
 
     # Define leg indices
@@ -74,6 +76,12 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
 
             # Forward pass
             outputs = model(slerp_img)
+
+            # Higher weight for pelvis reconstruction
+            pelvis_output = outputs[:, :, 0, :]
+            pelvis_original = original_clip[:, :, 0, :]
+            pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
+            pelvis_loss_weighted = 5.0 * pelvis_loss
 
             # Create weight tensor
             weights = torch.ones_like(outputs)  # Default weight of 1 for all joints
@@ -98,10 +106,26 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
             acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
             weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
 
+            # Step 2: Global context restoration for foot skating loss
+            global_translation = outputs[:, :, 0:1, :]
+
+            # local_joints: shape (B, T, J-1, F)
+            local_joints = outputs[:, :, 1:, :]
+            restored_joints = local_joints + global_translation  # Restore global context
+
+            # Step 3: Compute foot skating loss
+            # Compute foot skating loss
+            feet_indices = [7, 8, 10, 11]
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+
             # Accumulate losses
             val_loss += weighted_rec_loss.item()
             velocity_loss_total += weighted_velocity_loss.item()
             acceleration_loss_total += weighted_acceleration_loss.item()
+            pelvis_loss_total += pelvis_loss_weighted.item()
+            foot_skating_loss_total += foot_skating_loss.item()
 
             # Save reconstruction for the first batch if needed
             if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 0:
@@ -120,11 +144,17 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
     avg_acceleration_loss = acceleration_loss_total / len(val_loader)
+    avg_pelvis_loss = pelvis_loss_total / len(val_loader)  # Compute average pelvis loss
+    avg_foot_skating_loss = foot_skating_loss_total / len(val_loader)  # Compute average foot skating loss
     avg_leg_loss = leg_loss_total / len(val_loader)
-    total_loss = (
-        0.5 * avg_rec_loss +
-        0.3 * avg_velocity_loss +
-        0.2 * avg_acceleration_loss
+
+    # Updated total loss calculation with all components
+    avg_total_loss = (
+        0.55 * avg_rec_loss +
+        0.15 * avg_velocity_loss +
+        0.1 * avg_acceleration_loss +
+        0.1 * avg_pelvis_loss +
+        0.1 * avg_foot_skating_loss
     )
 
     # Log metrics to WandB
@@ -132,11 +162,13 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
         "Validation Loss (Reconstruction)": avg_rec_loss,
         "Validation Loss (Velocity)": avg_velocity_loss,
         "Validation Loss (Acceleration)": avg_acceleration_loss,
-        "Validation Loss (Leg Reconstruction)": avg_leg_loss,
-        "Validation Loss (Total)": total_loss,
+        "Validation Loss (Pelvis)": avg_pelvis_loss,
+        "Validation Loss (Foot Skating)": avg_foot_skating_loss,
+        "Validation Loss (Leg)": avg_leg_loss,
+        "Validation Loss (Total)": avg_total_loss,
     })
 
-    return total_loss
+    return avg_total_loss
 
 def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, exp_name):
     model.train()
@@ -145,16 +177,23 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
         velocity_loss_total = 0.0
         acceleration_loss_total = 0.0  # Track acceleration loss for the epoch
         leg_loss_total = 0.0  # Track leg-specific reconstruction loss
+        pelvis_loss_total = 0.0
+        foot_skating_loss_total = 0.0
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
         for clip_img, _, slerp_img, *_ in progress_bar:
             original_clip = clip_img.to(DEVICE)
             original_clip = original_clip.permute(0, 3, 2, 1)
             slerp_img = slerp_img.to(DEVICE)
-
+            
             # Forward pass
             outputs = model(slerp_img)
-
+            
+            # Higher weight for pelvis reconsturction
+            pelvis_output = outputs[:, :, 0, :]
+            pelvis_original = original_clip[:, :, 0, :]
+            pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
+            pelvis_loss_weighted = 5.0 * pelvis_loss
             # Define leg indices
             leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
@@ -177,22 +216,34 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
             weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
 
-            # Compute jerk loss (3rd derivative)
-            original_jerk = original_acceleration[:, :, :, 1:] - original_acceleration[:, :, :, :-1]
-            reconstructed_jerk = reconstructed_acceleration[:, :, :, 1:] - reconstructed_acceleration[:, :, :, :-1]
-            jerk_diff = (original_jerk - reconstructed_jerk) ** 2 * weights[:, :, :, 3:]
-            weighted_jerk_loss = jerk_diff.sum() / weights[:, :, :, 3:].sum()
-
             # Leg-specific reconstruction loss (for logging)
             leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
             leg_loss_total += leg_loss.item()
+            
+            # Step 2: Global context restoration for foot skating loss
+            global_translation = outputs[:, :, 0:1, :]
+
+            # local_joints: shape (B, T, J-1, F)
+            local_joints = outputs[:, :, 1:, :]
+            restored_joints = local_joints + global_translation  # Restore global context
+
+            # Step 3: Compute foot skating loss
+            # Compute foot skating loss
+            feet_indices = [7, 8, 10, 11]
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+            
+            pelvis_loss_total += pelvis_loss_weighted.item()
+            foot_skating_loss_total += foot_skating_loss.item()
 
             # Combine losses
             total_loss = (
-                0.6 * weighted_rec_loss +
-                0.2 * weighted_velocity_loss +
-                0.1 * weighted_acceleration_loss +
-                0.1 * weighted_jerk_loss  # Add jerk loss
+                0.55 * weighted_rec_loss +
+                0.15 * weighted_velocity_loss +
+                0.10 * weighted_acceleration_loss +
+                0.10 * foot_skating_loss +
+                0.10 * pelvis_loss_weighted
             )
 
 
@@ -209,6 +260,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
                 "Reconstruction Loss": weighted_rec_loss.item(),
                 "Velocity Loss": weighted_velocity_loss.item(),
                 "Acceleration Loss": weighted_acceleration_loss.item(),
+                "Foot Skating Loss": foot_skating_loss.item(),
+                "Pelvis Loss": pelvis_loss_weighted.item(),
                 "Total Loss": total_loss.item()
             })
 
@@ -217,7 +270,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
                 "Training Loss (Reconstruction)": weighted_rec_loss.item(),
                 "Training Loss (Velocity)": weighted_velocity_loss.item(),
                 "Training Loss (Acceleration)": weighted_acceleration_loss.item(),
-                "Leg Reconstruction Loss": leg_loss.item(),
+                "Training Loss (Foot Skating)": foot_skating_loss.item(),
+                "Training Loss (Pelvis)": pelvis_loss_weighted.item(),
                 "Training Loss (Batch Total)": total_loss.item(),
             })
 
@@ -225,30 +279,43 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
         avg_epoch_rec_loss = epoch_loss / len(train_loader)
         avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
         avg_epoch_acceleration_loss = acceleration_loss_total / len(train_loader)
+        avg_epoch_pelvis_loss = pelvis_loss_total / len(train_loader)  # Compute average pelvis loss
+        avg_epoch_foot_skating_loss = foot_skating_loss_total / len(train_loader)  # Compute average foot skating loss
         avg_epoch_leg_loss = leg_loss_total / len(train_loader)
+
+        # Updated total loss calculation with all components
         avg_epoch_total_loss = (
-            0.5 * avg_epoch_rec_loss +
-            0.3 * avg_epoch_velocity_loss +
-            0.2 * avg_epoch_acceleration_loss
+            0.55 * avg_epoch_rec_loss +
+            0.15 * avg_epoch_velocity_loss +
+            0.1 * avg_epoch_acceleration_loss +
+            0.1 * avg_epoch_pelvis_loss +
+            0.1 * avg_epoch_foot_skating_loss
         )
 
+        # Log to console
         logger.info(
             f"Epoch [{epoch+1}/{EPOCHS}] "
             f"Reconstruction Loss: {avg_epoch_rec_loss:.4f}, "
             f"Velocity Loss: {avg_epoch_velocity_loss:.4f}, "
             f"Acceleration Loss: {avg_epoch_acceleration_loss:.4f}, "
+            f"Pelvis Loss: {avg_epoch_pelvis_loss:.4f}, "
+            f"Foot Skating Loss: {avg_epoch_foot_skating_loss:.4f}, "
             f"Leg Loss: {avg_epoch_leg_loss:.4f}, "
             f"Total Loss: {avg_epoch_total_loss:.4f}"
         )
 
+        # Log to WandB
         wandb.log({
             "Epoch Training Reconstruction Loss": avg_epoch_rec_loss,
             "Epoch Training Velocity Loss": avg_epoch_velocity_loss,
             "Epoch Training Acceleration Loss": avg_epoch_acceleration_loss,
+            "Epoch Training Pelvis Loss": avg_epoch_pelvis_loss,
+            "Epoch Training Foot Skating Loss": avg_epoch_foot_skating_loss,
             "Epoch Training Leg Loss": avg_epoch_leg_loss,
             "Epoch Training Total Loss": avg_epoch_total_loss,
             "Epoch": epoch + 1,
         })
+
 
         # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
@@ -325,7 +392,7 @@ if __name__ == "__main__":
         "device": DEVICE.type,
     })
 
-    grab_dir = '../../../data/edwarde/dataset/preprocessed_grab'
+    grab_dir = '../../../data/edwarde/dataset/global_pelvis'
     train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
     test_datasets = ['s9', 's10']
 
