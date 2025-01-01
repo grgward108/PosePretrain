@@ -427,6 +427,10 @@ class GRAB_DataLoader(data.Dataset):
 
                 """ Put on Floor for joints """
                 cur_body_joints[:, :, 1] = cur_body_joints[:, :, 1] - cur_body_joints[:, :, 1].min()
+                
+                pelvis_global = cur_body_joints[:, 0:1, :].copy()  # [T-1, 1, 3]
+                pelvis_global[:, :, 2] = 0  # Set the z-dimension (third dimension) to 0
+
                 z_transl = cur_body_joints[:, :, 1].min()
 
                 """ Add Reference Joint """
@@ -465,6 +469,7 @@ class GRAB_DataLoader(data.Dataset):
                 cur_body_joints[:, :, [1, 2]] = cur_body_joints[:, :, [2, 1]]
                 # Now cur_body_joints is [T, 1+(25 or 55), 3], we need to drop the last frame and first ref joint
                 cur_body_joints = cur_body_joints[0:-1, 1:, :]  # [T-1, 25 or 55, 3]
+                cur_body_joints = np.concatenate([pelvis_global[:-1], cur_body_joints], axis=1)  # [T-1, 26 or 56, 3]
 
 
             ############################# local markers from Holten ###############################
@@ -487,6 +492,8 @@ class GRAB_DataLoader(data.Dataset):
 
                 # Truncate markers to match joint frames
                 cur_body_markers = cur_body_markers[0:-1, :, :]  # [T-1, n_markers, 3]
+                cur_body_markers = np.concatenate([pelvis_global[:-1], cur_body_markers], axis=1)  # [T-1, 25 + 1 or 55 + 1, 3]
+
                 
                 self.marker_start_list.append(cur_body_markers[0])
                 self.marker_end_list.append(cur_body_markers[-1])
@@ -683,8 +690,8 @@ class GRAB_DataLoader(data.Dataset):
         joint_start = self.joint_start_list[index]
         joint_end = self.joint_end_list[index]
 
-        first_frame = joint_start[0:25, :]
-        last_frame = joint_end[0:25, :]
+        first_frame = joint_start[0:26, :] #here because we added the pelvis global as first joints we take 26 joints now
+        last_frame = joint_end[0:26, :]
         slerp_img = self.generate_linear_frames(first_frame, last_frame, 61)
         slerp_img = torch.from_numpy(slerp_img).float().cpu().detach().numpy()
 
