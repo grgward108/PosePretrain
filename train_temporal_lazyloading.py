@@ -82,11 +82,26 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             raw_rec_loss = unseen_loss.sum()
             normalized_rec_loss = raw_rec_loss / inverted_mask.sum()
 
-            # Higher weight for pelvis reconstruction
-            pelvis_output = unseen_outputs[:, 0:1, :]
-            pelvis_original = unseen_original[:, 0:1, :]
+            # Step 1: Higher weight for pelvis reconstruction
+            # Include time dimension when selecting the pelvis joint (J=0)
+            pelvis_output = unseen_outputs[:, :, 0:1, :]  # Correct slicing: keep time and pelvis joint
+            pelvis_original = unseen_original[:, :, 0:1, :]  # Correct slicing
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).sum() / inverted_mask.sum()
-            pelvis_loss_weighted = 5.0 * pelvis_loss
+            pelvis_loss_weighted = 5.0 * pelvis_loss  # Add higher weight for pelvis
+
+            # Step 2: Global context restoration for foot skating loss
+            # Include time dimension when separating pelvis (J=0) and other joints (J=1:)
+            global_translation = outputs[:, :, 0:1, :]  # Correct slicing: keep time and pelvis joint
+            local_joints = outputs[:, :, 1:, :]  # Correct slicing: exclude pelvis, keep time and other joints
+            restored_joints = local_joints + global_translation  # Restore global context
+
+            # Step 3: Compute foot skating loss
+            # Include time dimension when selecting foot joints
+            feet_indices = [7, 8, 10, 11]  # Foot joint indices
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Correct slicing: keep time and feet
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Temporal difference
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()  # Foot skating loss
+
 
             # Velocity loss
             original_velocity = original_clip[:, :, :, 1:] - original_clip[:, :, :, :-1]
@@ -101,18 +116,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2
             raw_acceleration_loss = acceleration_diff.sum()
             normalized_acceleration_loss = raw_acceleration_loss / acceleration_diff.numel()
-
-            # Global context restoration for foot skating loss
-            global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
-            local_joints = outputs[:, 1:, :]  # Strip the pelvis
-            restored_joints = local_joints + global_translation  # Restore global context
-
-            # Compute foot skating loss
-            feet_indices = [7, 8, 10, 11]
-            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
-            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
-
+            
             # Accumulate losses
             val_loss += normalized_rec_loss.item()
             velocity_loss_total += normalized_velocity_loss.item()
@@ -190,22 +194,25 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             unseen_original = original_clip * inverted_mask
 
             # Step 1: Higher weight for pelvis reconstruction
-            pelvis_output = unseen_outputs[:, 0:1, :]
-            pelvis_original = unseen_original[:, 0:1, :]
+            # Include time dimension when selecting the pelvis joint (J=0)
+            pelvis_output = unseen_outputs[:, :, 0:1, :]  # Correct slicing: keep time and pelvis joint
+            pelvis_original = unseen_original[:, :, 0:1, :]  # Correct slicing
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).sum() / inverted_mask.sum()
             pelvis_loss_weighted = 5.0 * pelvis_loss  # Add higher weight for pelvis
 
             # Step 2: Global context restoration for foot skating loss
-            global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
-            local_joints = outputs[:, 1:, :]  # Strip the pelvis
+            # Include time dimension when separating pelvis (J=0) and other joints (J=1:)
+            global_translation = outputs[:, :, 0:1, :]  # Correct slicing: keep time and pelvis joint
+            local_joints = outputs[:, :, 1:, :]  # Correct slicing: exclude pelvis, keep time and other joints
             restored_joints = local_joints + global_translation  # Restore global context
 
             # Step 3: Compute foot skating loss
-            # Compute foot skating loss
-            feet_indices = [7, 8, 10, 11]
-            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
-            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+            # Include time dimension when selecting foot joints
+            feet_indices = [7, 8, 10, 11]  # Foot joint indices
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Correct slicing: keep time and feet
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Temporal difference
+            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()  # Foot skating loss
+
 
             # Step 4: Compute other losses
             unseen_loss = ((unseen_outputs - unseen_original) ** 2) * inverted_mask
@@ -407,7 +414,7 @@ if __name__ == "__main__":
         stride=STRIDE
     )
 
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
 
     # To determine num_joints dynamically from the dataset:
     sample_masked_clip, sample_mask, sample_original_clip = train_dataset[0]
