@@ -106,11 +106,10 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
             local_joints = outputs[:, 1:, :]  # Strip the pelvis
             restored_joints = local_joints + global_translation  # Restore global context
-            restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
 
             # Compute foot skating loss
-            feet_indices = [7, 8, 10, 11] 
-            foot_positions = restored_clip[:, :, feet_indices, :]
+            feet_indices = [7, 8, 10, 11]
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
             foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
             foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
 
@@ -122,7 +121,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             foot_skating_loss_total += foot_skating_loss.item()
 
             # Save reconstruction for the first batch if needed
-            if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 6:
+            if save_reconstruction and not first_batch_saved and save_dir and epoch and i == 0:
                 save_reconstruction_npz(
                     markers=masked_clip,
                     reconstructed_markers=outputs,
@@ -200,12 +199,12 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             global_translation = outputs[:, 0:1, :]  # Extract pelvis (global translation)
             local_joints = outputs[:, 1:, :]  # Strip the pelvis
             restored_joints = local_joints + global_translation  # Restore global context
-            restored_clip = torch.cat([global_translation, restored_joints], dim=1)  # Restore full sequence
 
             # Step 3: Compute foot skating loss
-            feet_indices = [7, 8, 10, 11] 
-            foot_positions = restored_clip[:, :, feet_indices, :]  # Get foot positions
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Compute foot velocity
+            # Compute foot skating loss
+            feet_indices = [7, 8, 10, 11]
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
+            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
             foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
 
             # Step 4: Compute other losses
