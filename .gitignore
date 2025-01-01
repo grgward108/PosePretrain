@@ -9,3 +9,5 @@ wandb/
 wandb
 liftup_log/
 temporal_log/
+AMASS/
+body_utils/
