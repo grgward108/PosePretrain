@@ -64,15 +64,38 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
     first_batch_saved = False
 
     # Define leg indices
-    leg_indices = [1, 2, 4, 5, 7, 8, 10, 11]
+    leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
     with torch.no_grad():
-        for i, (clip_img, _, slerp_img, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
-            original_clip = clip_img.to(device)
+        for i, (clip_img_joints, _, slerp_img, traj, joint_start_global, joint_end_global, *_ ) in enumerate(tqdm(val_loader, desc="Validating")):
+            original_clip = clip_img_joints.to(device)
+            original_clip = original_clip.permute(0, 3, 2, 1)  # [batch_size, 61, 25, 3]
             slerp_img = slerp_img.to(device)
 
-            # Permute to match expected input format
-            original_clip = original_clip.permute(0, 3, 2, 1)
+            traj = traj[:, :2, :].to(device)  # Take only x and y, shape [batch_size, 2, frames]
+            joint_start_global = joint_start_global.to(device)
+            joint_end_global = joint_end_global.to(device)
+
+            pelvis_start = joint_start_global[:, 0, :2]  # Extract pelvis (x, y) from start
+            pelvis_end = joint_end_global[:, 0, :2]      # Extract pelvis (x, y) from end
+
+            frames = 61  # Number of frames (matching original_clip and slerp_img)
+            interp_weights = torch.linspace(0, 1, frames).view(1, -1, 1).to(pelvis_start.device)  # Interpolation weights
+
+            # Interpolated pelvis trajectory
+            interp_pelvis = (1 - interp_weights) * pelvis_start.unsqueeze(1) + interp_weights * pelvis_end.unsqueeze(1)  # Shape: [batch_size, frames, 2]
+
+            # Transform traj to have shape [batch_size, frames, 1, 3]
+            traj = traj.permute(0, 2, 1)  # Change shape to [batch_size, frames, 2]
+            traj = traj[:, :frames, :]  # Adjust traj to match the number of frames
+            traj = traj.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+            traj = torch.cat([traj, torch.zeros(traj.shape[0], traj.shape[1], 1, 1, device=device)], dim=-1)  # Add z dimension
+            interp_pelvis = interp_pelvis.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+            interp_pelvis = torch.cat([interp_pelvis, torch.zeros(interp_pelvis.shape[0], interp_pelvis.shape[1], 1, 1, device=device)], dim=-1)
+            original_clip = torch.cat([traj, original_clip], dim=2)  # Concatenate without unsqueezing
+
+            # Prepend interp_pelvis to slerp_img
+            slerp_img = torch.cat([interp_pelvis, slerp_img], dim=2)  # Concatenate without unsqueezing
 
             # Forward pass
             outputs = model(slerp_img)
@@ -248,12 +271,10 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             
             # Step 2: Global context restoration for foot skating loss
             global_translation = outputs[:, :, 0:1, :]
-            print("global_translation shape: ", global_translation.shape)
 
             # local_joints: shape (B, T, J-1, F)
             local_joints = outputs[:, :, 1:, :]
             restored_joints = local_joints + global_translation  # Restore global context
-            print("restored_joints shape: ", restored_joints.shape)
 
             # Step 3: Compute foot skating loss
             # Compute foot skating loss
@@ -370,7 +391,6 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             )
             logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Validation Loss: {val_loss:.4f}")
             wandb.log({"Validation Loss": val_loss, "Epoch": epoch + 1})
-
 
 if __name__ == "__main__":
 
