@@ -174,10 +174,10 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
     # Updated total loss calculation with all components
     avg_total_loss = (
         0.55 * avg_rec_loss +
-        0.15 * avg_velocity_loss +
-        0.1 * avg_acceleration_loss +
-        0.1 * avg_pelvis_loss +
-        0.1 * avg_foot_skating_loss
+        0.1 * avg_velocity_loss +
+        0.05 * avg_acceleration_loss +
+        0.15 * avg_pelvis_loss +
+        0.15 * avg_foot_skating_loss
     )
 
     # Log metrics to WandB
@@ -289,10 +289,10 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             # Combine losses
             total_loss = (
                 0.55 * weighted_rec_loss +
-                0.15 * weighted_velocity_loss +
-                0.10 * weighted_acceleration_loss +
-                0.10 * foot_skating_loss +
-                0.10 * pelvis_loss_weighted
+                0.1 * weighted_velocity_loss +
+                0.05 * weighted_acceleration_loss +
+                0.15 * foot_skating_loss +
+                0.15 * pelvis_loss_weighted
             )
 
 
@@ -335,10 +335,10 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
         # Updated total loss calculation with all components
         avg_epoch_total_loss = (
             0.55 * avg_epoch_rec_loss +
-            0.15 * avg_epoch_velocity_loss +
-            0.1 * avg_epoch_acceleration_loss +
-            0.1 * avg_epoch_pelvis_loss +
-            0.1 * avg_epoch_foot_skating_loss
+            0.1 * avg_epoch_velocity_loss +
+            0.05 * avg_epoch_acceleration_loss +
+            0.15 * avg_epoch_pelvis_loss +
+            0.15 * avg_epoch_foot_skating_loss
         )
 
         # Log to console
