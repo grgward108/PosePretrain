@@ -29,6 +29,14 @@ SMPLX_MODEL_PATH = 'body_utils/body_models'
 NUM_JOINTS = 22
 NUM_MARKERS = 143
 VALIDATE_EVERY = 5
+PELVIS_LOSS_WEIGHT = 5.0
+LEG_RECONSTRUCTION_WEIGHT = 2.0
+
+FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.6
+FINAL_VELOCITY_LOSS_WEIGHT = 0.1
+FINAL_ACCELERATION_LOSS_WEIGHT = 0.05
+FINAL_PELVIS_LOSS_WEIGHT = 0.10
+FINAL_FOOT_SKATING_LOSS_WEIGHT = 0.15
 
 
 grab_dir = '../../../data/edwarde/dataset/preprocessed_grab'
@@ -37,21 +45,29 @@ test_datasets = ['s9', 's10']
 
 #save the infilled joints, lifted markers, original joints, original markers, slerp input in an npz file
 
-def save_reconstruction_npz(slerp_img, temp_filled_joints, temp_original_joints, lift_predicted_markers,  lift_original_markers, traj_gt, rot_0_pivot, transf_matrix_smplx, joint_start, save_dir, epoch, exp_name):
+def save_reconstruction_npz(
+    slerp_img, temp_filled_joints, temp_original_joints, lift_predicted_markers,
+    lift_original_markers, traj_gt, rot_0_pivot, transf_matrix_smplx, joint_start,
+    save_dir, epoch, exp_name, batch
+):
     save_path = os.path.join(save_dir, exp_name)
-    os.makedirs(save_path, exist_ok=True) 
-    np.savez_compressed(os.path.join(save_path, f"e2e_finetune_{exp_name}_reconstruction_epoch_{epoch+1}.npz"),
-             slerp_img=slerp_img.cpu().numpy(),
-             temp_filled_joints=temp_filled_joints.cpu().numpy(),
-             temp_original_joints=temp_original_joints.cpu().numpy(),
-             lift_predicted_markers=lift_predicted_markers.cpu().numpy(),
-             lift_original_markers=lift_original_markers.cpu().numpy(),
-             traj_gt=traj_gt.cpu().numpy(),
-             rot_0_pivot=rot_0_pivot.cpu().numpy(),
-             transf_matrix_smplx=transf_matrix_smplx.cpu().numpy(),
-             joint_start=joint_start.cpu().numpy()
-             )
-    print(f"Reconstruction saved at {os.path.join(save_path, f'{exp_name}_reconstruction_epoch_{epoch+1}.npz')}")
+    os.makedirs(save_path, exist_ok=True)
+
+    file_name = f"e2e_finetune_{exp_name}_reconstruction_epoch_{epoch+1}_batch_{batch}.npz"
+    np.savez_compressed(
+        os.path.join(save_path, file_name),
+        slerp_img=slerp_img.cpu().numpy(),
+        temp_filled_joints=temp_filled_joints.cpu().numpy(),
+        temp_original_joints=temp_original_joints.cpu().numpy(),
+        lift_predicted_markers=lift_predicted_markers.cpu().numpy(),
+        lift_original_markers=lift_original_markers.cpu().numpy(),
+        traj_gt=traj_gt.cpu().numpy(),
+        rot_0_pivot=rot_0_pivot.cpu().numpy(),
+        transf_matrix_smplx=transf_matrix_smplx.cpu().numpy(),
+        joint_start=joint_start.cpu().numpy(),
+    )
+    print(f"Reconstruction saved at {os.path.join(save_path, file_name)}")
+
     
 
 def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
@@ -63,7 +79,7 @@ def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
     leg_joint_indices = [1, 2, 4, 5, 7, 8, 10, 11]
     right_hand_indices = torch.cat([torch.arange(64, 79), torch.arange(121, 143)]).to(DEVICE)
 
-    for clip_img_joints, clip_img_markers, slerp_img, traj, *_ in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
+    for clip_img_joints, clip_img_markers, slerp_img, traj, joint_start_global, joint_end_global, *_ in tqdm(dataloader, desc=f"Training Epoch {epoch + 1}"):
         slerp_img = slerp_img.to(DEVICE, dtype=torch.float32)
         temp_original_joints = clip_img_joints.to(DEVICE, dtype=torch.float32)
         lift_original_markers = clip_img_markers.to(DEVICE, dtype=torch.float32)
@@ -74,26 +90,91 @@ def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
         # Align dimensions
         temp_original_joints = temp_original_joints.permute(0, 3, 2, 1)  # [B, C, J, T]
         
+        traj = traj[:, :2, :].to(DEVICE)  # Take only x and y, shape [batch_size, 2, frames]
+        joint_start_global = joint_start_global.to(DEVICE)
+        joint_end_global = joint_end_global.to(DEVICE)
+
+        pelvis_start = joint_start_global[:, 0, :2]  # Extract pelvis (x, y) from start
+        pelvis_end = joint_end_global[:, 0, :2]      # Extract pelvis (x, y) from end
+
+        frames = 61  # Number of frames (matching original_clip and slerp_img)
+        interp_weights = torch.linspace(0, 1, frames).view(1, -1, 1).to(pelvis_start.device)  # Interpolation weights
+
+        # Interpolated pelvis trajectory
+        interp_pelvis = (1 - interp_weights) * pelvis_start.unsqueeze(1) + interp_weights * pelvis_end.unsqueeze(1)  # Shape: [batch_size, frames, 2]
+
+        # Transform traj to have shape [batch_size, frames, 1, 3]
+        traj = traj.permute(0, 2, 1)  # Change shape to [batch_size, frames, 2]
+        traj = traj[:, :frames, :]  # Adjust traj to match the number of frames
+        traj = traj.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+        traj = torch.cat([traj, torch.zeros(traj.shape[0], traj.shape[1], 1, 1, device=DEVICE)], dim=-1)  # Add z dimension
+        interp_pelvis = interp_pelvis.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+        interp_pelvis = torch.cat([interp_pelvis, torch.zeros(interp_pelvis.shape[0], interp_pelvis.shape[1], 1, 1, device=DEVICE)], dim=-1)
+        temp_original_joints = torch.cat([traj, temp_original_joints], dim=2)  # Concatenate without unsqueezing
+
+        # Prepend interp_pelvis to slerp_img
+        slerp_img = torch.cat([interp_pelvis, slerp_img], dim=2)  # Concatenate without unsqueezing
+
+        # Forward pass
+        temp_filled_joints = model(slerp_img)
+
+        
         ############################ Temporal Transformer Loss ############################
-        weights = torch.ones_like(temp_filled_joints).to(DEVICE)
-        weights[:, :, leg_joint_indices, :] *= 3.0
+        pelvis_output = temp_filled_joints[:, :, 0, :]
+        pelvis_original = temp_original_joints[:, :, 0, :]
+        pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
+        pelvis_loss_weighted = PELVIS_LOSS_WEIGHT * pelvis_loss
+        
+        # Define leg indices
+        leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
+
+        # Create weight tensor (double the weight for leg joints)
+        weights = torch.ones_like(temp_filled_joints)  
+        weights[:, :, leg_indices, :] *= LEG_RECONSTRUCTION_WEIGHT
+
+        # Weighted reconstruction loss
         weighted_rec_loss = ((temp_filled_joints - temp_original_joints) ** 2 * weights).sum() / weights.sum()
 
-        # Velocity Loss
+        # Compute velocity (1st derivative)
         original_velocity = temp_original_joints[:, :, :, 1:] - temp_original_joints[:, :, :, :-1]
         reconstructed_velocity = temp_filled_joints[:, :, :, 1:] - temp_filled_joints[:, :, :, :-1]
-        weighted_velocity_loss = ((original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]).sum() / weights[:, :, :, 1:].sum()
+        velocity_diff = (original_velocity - reconstructed_velocity) ** 2 * weights[:, :, :, 1:]
+        weighted_velocity_loss = velocity_diff.sum() / weights[:, :, :, 1:].sum()
 
-        # Acceleration Loss
+        # Compute acceleration (2nd derivative)
         original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
         reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
-        weighted_acceleration_loss = ((original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]).sum() / weights[:, :, :, 2:].sum()
+        acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2 * weights[:, :, :, 2:]
+        weighted_acceleration_loss = acceleration_diff.sum() / weights[:, :, :, 2:].sum()
 
-        # Temporal Loss
+        # Leg-specific reconstruction loss (for logging)
+        leg_loss = ((temp_filled_joints[:, :, leg_indices, :] - temp_original_joints[:, :, leg_indices, :]) ** 2).mean()
+        leg_loss_total += leg_loss.item()
+        
+        # Step 2: Global context restoration for foot skating loss
+        global_translation = temp_filled_joints[:, :, 0:1, :]
+
+        # local_joints: shape (B, T, J-1, F)
+        local_joints = temp_filled_joints[:, :, 1:, :]
+        restored_joints = local_joints + global_translation  # Restore global context
+
+        # Step 3: Compute foot skating loss
+        # Compute foot skating loss
+        feet_indices = [7, 8, 10, 11]
+        foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
+        foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
+        foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+        
+        pelvis_loss_total += pelvis_loss_weighted.item()
+        foot_skating_loss_total += foot_skating_loss.item()
+
+        # Combine losses
         temporal_loss = (
-            0.6 * weighted_rec_loss +
-            0.3 * weighted_velocity_loss +
-            0.1 * weighted_acceleration_loss
+            FINAL_RECONSTRUCTION_LOSS_WEIGHT * weighted_rec_loss +
+            FINAL_VELOCITY_LOSS_WEIGHT * weighted_velocity_loss +
+            FINAL_ACCELERATION_LOSS_WEIGHT * weighted_acceleration_loss +
+            FINAL_FOOT_SKATING_LOSS_WEIGHT * foot_skating_loss +
+            FINAL_PELVIS_LOSS_WEIGHT * pelvis_loss_weighted
         )
 
         ############################ Lift-Up Transformer Loss ############################
@@ -131,11 +212,12 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
     acceleration_loss_total = 0.0
     temporal_loss_total = 0.0
     lift_loss_total = 0.0
-    first_batch_saved = False  # Flag to ensure we only save the first batch
 
     # Define leg and hand indices
     leg_joint_indices = [1, 2, 4, 5, 7, 8, 10, 11]
     right_hand_indices = torch.cat([torch.arange(64, 79), torch.arange(121, 143)]).to(DEVICE)
+
+    batch_count = 0  # Track the batch number
 
     with torch.no_grad():
         for clip_img_joints, clip_img_markers, slerp_img, traj_gt, smplx_beta, gender, rot_0_pivot, transf_matrix_smplx, smplx_params_gt, marker_start, marker_end, joint_start, joint_end in tqdm(dataloader, desc="Validating"):
@@ -173,7 +255,7 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
             )
             temporal_loss_total += temporal_loss.item()
 
-            ############################ LiftUp Transformer Loss ############################
+            ############################ Lift-Up Transformer Loss ############################
             weights = torch.ones_like(lift_predicted_markers).to(DEVICE)
             weights[:, :, right_hand_indices, :] *= 2.0
             lift_loss = ((lift_predicted_markers - lift_original_markers) ** 2 * weights).sum() / weights.sum()
@@ -183,23 +265,25 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
             total_loss = 0.6 * temporal_loss + 0.4 * lift_loss
             val_loss += total_loss.item()
 
-            # Save reconstruction for the first batch only
-            if not first_batch_saved and save_dir is not None:
-                save_reconstruction_npz(
-                    slerp_img=slerp_img[0],  # Save only the first sequence in the batch
-                    temp_filled_joints=temp_filled_joints[0],
-                    temp_original_joints=temp_original_joints[0],
-                    lift_predicted_markers=lift_predicted_markers[0],
-                    lift_original_markers=lift_original_markers[0],
-                    traj_gt=traj_gt[0],
-                    rot_0_pivot=rot_0_pivot[0],
-                    transf_matrix_smplx=transf_matrix_smplx[0],
-                    joint_start=joint_start[0],
-                    save_dir=save_dir,
-                    epoch=epoch,
-                    exp_name=exp_name
-                )
-                first_batch_saved = True
+            # Save reconstruction for all sequences in the batch
+            if save_dir is not None:
+                for i in range(slerp_img.shape[0]):  # Iterate over all samples in the batch
+                    save_reconstruction_npz(
+                        slerp_img=slerp_img[i],
+                        temp_filled_joints=temp_filled_joints[i],
+                        temp_original_joints=temp_original_joints[i],
+                        lift_predicted_markers=lift_predicted_markers[i],
+                        lift_original_markers=lift_original_markers[i],
+                        traj_gt=traj_gt[i],
+                        rot_0_pivot=rot_0_pivot[i],
+                        transf_matrix_smplx=transf_matrix_smplx[i],
+                        joint_start=joint_start[i],
+                        save_dir=save_dir,
+                        epoch=epoch,
+                        exp_name=exp_name,
+                        batch=batch_count
+                    )
+                    batch_count += 1  # Increment batch count
 
     # Compute average validation loss
     avg_val_loss = val_loss / len(dataloader)
@@ -208,8 +292,6 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
 
     print(f"Validation - Total Loss: {avg_val_loss:.4f}, Temporal Loss: {avg_temporal_loss:.4f}, Lift Loss: {avg_lift_loss:.4f}")
     return avg_val_loss
-
-
 
 def main(exp_name):
     # Logging and Checkpoint Directories
