@@ -181,30 +181,45 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
         foot_skating_loss_total = 0.0
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
-        for clip_img, _, slerp_img, traj, joint_start_global, joint_end_global, *_ in progress_bar:
-            original_clip = clip_img.to(DEVICE)
-            original_clip = original_clip.permute(0, 3, 2, 1)
+        for clip_img_joints, _, slerp_img, traj, joint_start_global, joint_end_global, *_ in progress_bar:
+            original_clip = clip_img_joints.to(DEVICE)
+            original_clip = original_clip.permute(0, 3, 2, 1)  # [batch_size, 61, 25, 3]
             slerp_img = slerp_img.to(DEVICE)
-            
+
             traj = traj[:, :2, :].to(DEVICE)  # Take only x and y, shape [batch_size, 2, frames]
-            # add a third dimension of traj, which is the z but all 0
-            traj = torch.cat([traj, torch.zeros(traj.shape[0], 1, traj.shape[2], device=DEVICE)], dim=1)
             joint_start_global = joint_start_global.to(DEVICE)
             joint_end_global = joint_end_global.to(DEVICE)
-            
+
             pelvis_start = joint_start_global[:, 0, :2]  # Extract pelvis (x, y) from start
             pelvis_end = joint_end_global[:, 0, :2]      # Extract pelvis (x, y) from end
-            
-            
-            
+
+            frames = 61  # Number of frames (matching original_clip and slerp_img)
+            interp_weights = torch.linspace(0, 1, frames).view(1, -1, 1).to(pelvis_start.device)  # Interpolation weights
+
+            # Interpolated pelvis trajectory
+            interp_pelvis = (1 - interp_weights) * pelvis_start.unsqueeze(1) + interp_weights * pelvis_end.unsqueeze(1)  # Shape: [batch_size, frames, 2]
+
+            # Transform traj to have shape [batch_size, frames, 1, 3]
+            traj = traj.permute(0, 2, 1)  # Change shape to [batch_size, frames, 2]
+            traj = traj[:, :frames, :]  # Adjust traj to match the number of frames
+            traj = traj.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+            traj = torch.cat([traj, torch.zeros(traj.shape[0], traj.shape[1], 1, 1, device=DEVICE)], dim=-1)  # Add z dimension
+            interp_pelvis = interp_pelvis.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
+            interp_pelvis = torch.cat([interp_pelvis, torch.zeros(interp_pelvis.shape[0], interp_pelvis.shape[1], 1, 1, device=DEVICE)], dim=-1)
+            original_clip = torch.cat([traj, original_clip], dim=2)  # Concatenate without unsqueezing
+
+            # Prepend interp_pelvis to slerp_img
+            slerp_img = torch.cat([interp_pelvis, slerp_img], dim=2)  # Concatenate without unsqueezing
+
             # Forward pass
             outputs = model(slerp_img)
-            
+
             # Higher weight for pelvis reconsturction
             pelvis_output = outputs[:, :, 0, :]
             pelvis_original = original_clip[:, :, 0, :]
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
             pelvis_loss_weighted = 5.0 * pelvis_loss
+            
             # Define leg indices
             leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
@@ -233,10 +248,12 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             
             # Step 2: Global context restoration for foot skating loss
             global_translation = outputs[:, :, 0:1, :]
+            print("global_translation shape: ", global_translation.shape)
 
             # local_joints: shape (B, T, J-1, F)
             local_joints = outputs[:, :, 1:, :]
             restored_joints = local_joints + global_translation  # Restore global context
+            print("restored_joints shape: ", restored_joints.shape)
 
             # Step 3: Compute foot skating loss
             # Compute foot skating loss
@@ -403,7 +420,7 @@ if __name__ == "__main__":
         "device": DEVICE.type,
     })
 
-    grab_dir = '../../../data/edwarde/dataset/global_pelvis'
+    grab_dir = '../../../data/edwarde/dataset/include_global_traj'
     train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
     test_datasets = ['s9', 's10']
 
