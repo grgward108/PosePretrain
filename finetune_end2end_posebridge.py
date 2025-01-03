@@ -473,10 +473,14 @@ def main(exp_name):
     else:
         logger.warning(f"LiftUpTransformer checkpoint not found at {liftup_checkpoint_path}. Training from scratch.")
 
+    # Freeze LiftUpTransformer parameters
+    for param in liftup_transformer.parameters():
+        param.requires_grad = False
+
     # Combine Models
     model = EndToEndModel(temporal_transformer, liftup_transformer).to(DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
 
     # Best validation loss tracking
