@@ -15,3 +15,5 @@ posebridge_log/
 finetune_liftup_log/
 inference_posebridge/
 test_02/
+globaltrajectory_log/
+globaltrajectory_yonly_log/
