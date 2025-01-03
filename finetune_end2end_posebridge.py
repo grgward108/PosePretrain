@@ -206,7 +206,7 @@ def train_combined(model, optimizer, dataloader, epoch, logger, DEVICE):
         lift_loss = ((lift_predicted_markers - lift_original_markers) ** 2 * weights).sum() / weights.sum()
 
         # Total Loss
-        total_loss = 0.6 * temporal_loss + 0.4 * lift_loss
+        total_loss = 0.8 * temporal_loss + 0.2 * lift_loss
 
         # Backpropagation
         optimizer.zero_grad()
@@ -236,6 +236,7 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
     pelvis_loss_total = 0.0
     foot_skating_loss_total = 0.0
     num_batches = len(dataloader)
+    save_first_batch = True
 
     # Define leg and hand indices
     leg_joint_indices = [1, 2, 4, 5, 7, 8, 10, 11]
@@ -346,11 +347,11 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
             lift_loss = ((lift_predicted_markers - lift_original_markers) ** 2 * weights).sum() / weights.sum()
 
             # Total Loss
-            total_loss = 0.6 * temporal_loss + 0.4 * lift_loss
+            total_loss = 0.8 * temporal_loss + 0.2 * lift_loss
             val_loss += total_loss.item()
 
             # Save reconstruction for all sequences in the batch
-            if save_dir is not None:
+            if save_dir is not None and save_first_batch:
                 save_reconstruction_npz(
                     slerp_img=slerp_img,  # Save the entire batch
                     temp_filled_joints=temp_filled_joints,
@@ -363,9 +364,9 @@ def validate_combined(model, dataloader, DEVICE, save_dir=None, epoch=None, exp_
                     joint_start=None,  # Optional, set to None
                     save_dir=save_dir,
                     epoch=epoch,
-                    exp_name=exp_name,
-                    batch=None  # Batch index is no longer needed
+                    exp_name=exp_name
                 )
+                save_first_batch = False
 
 
     # Compute average validation loss
