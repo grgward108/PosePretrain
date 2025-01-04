@@ -24,7 +24,17 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 26 # change to 26 because we add one more pelvis global joint
-TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_pretrained_globalpelvis.pth'
+TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_fixglobalpelvis.pth'
+
+PELVIS_LOSS_WEIGHT = 5.0
+LEG_RECONSTRUCTION_WEIGHT = 2.0
+
+FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.6
+FINAL_VELOCITY_LOSS_WEIGHT = 0.1
+FINAL_ACCELERATION_LOSS_WEIGHT = 0.05
+FINAL_PELVIS_LOSS_WEIGHT = 0.10
+FINAL_FOOT_SKATING_LOSS_WEIGHT = 0.15
+
 
 grab_dir = '../../../data/edwarde/dataset/include_global_traj'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
@@ -104,11 +114,11 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
             pelvis_output = outputs[:, :, 0, :]
             pelvis_original = original_clip[:, :, 0, :]
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
-            pelvis_loss_weighted = 5.0 * pelvis_loss
+            pelvis_loss_weighted = PELVIS_LOSS_WEIGHT * pelvis_loss
 
             # Create weight tensor
             weights = torch.ones_like(outputs)  # Default weight of 1 for all joints
-            weights[:, :, leg_indices, :] *= 2.0  # Double the weight for leg joints
+            weights[:, :, leg_indices, :] *= LEG_RECONSTRUCTION_WEIGHT  # Double the weight for leg joints
 
             # Weighted reconstruction loss
             weighted_rec_loss = ((outputs - original_clip) ** 2 * weights).sum() / weights.sum()
@@ -173,11 +183,11 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
 
     # Updated total loss calculation with all components
     avg_total_loss = (
-        0.55 * avg_rec_loss +
-        0.1 * avg_velocity_loss +
-        0.05 * avg_acceleration_loss +
-        0.15 * avg_pelvis_loss +
-        0.15 * avg_foot_skating_loss
+        FINAL_RECONSTRUCTION_LOSS_WEIGHT * avg_rec_loss +
+        FINAL_VELOCITY_LOSS_WEIGHT * avg_velocity_loss +
+        FINAL_ACCELERATION_LOSS_WEIGHT * avg_acceleration_loss +
+        FINAL_PELVIS_LOSS_WEIGHT * avg_pelvis_loss +
+        FINAL_FOOT_SKATING_LOSS_WEIGHT * avg_foot_skating_loss
     )
 
     # Log metrics to WandB
@@ -241,14 +251,14 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             pelvis_output = outputs[:, :, 0, :]
             pelvis_original = original_clip[:, :, 0, :]
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
-            pelvis_loss_weighted = 5.0 * pelvis_loss
+            pelvis_loss_weighted = PELVIS_LOSS_WEIGHT * pelvis_loss
             
             # Define leg indices
             leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
             # Create weight tensor (double the weight for leg joints)
             weights = torch.ones_like(outputs)  
-            weights[:, :, leg_indices, :] *= 2.0  
+            weights[:, :, leg_indices, :] *= LEG_RECONSTRUCTION_WEIGHT
 
             # Weighted reconstruction loss
             weighted_rec_loss = ((outputs - original_clip) ** 2 * weights).sum() / weights.sum()
@@ -288,11 +298,11 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
 
             # Combine losses
             total_loss = (
-                0.55 * weighted_rec_loss +
-                0.1 * weighted_velocity_loss +
-                0.05 * weighted_acceleration_loss +
-                0.15 * foot_skating_loss +
-                0.15 * pelvis_loss_weighted
+                FINAL_RECONSTRUCTION_LOSS_WEIGHT * weighted_rec_loss +
+                FINAL_VELOCITY_LOSS_WEIGHT * weighted_velocity_loss +
+                FINAL_ACCELERATION_LOSS_WEIGHT * weighted_acceleration_loss +
+                FINAL_FOOT_SKATING_LOSS_WEIGHT * foot_skating_loss +
+                FINAL_PELVIS_LOSS_WEIGHT * pelvis_loss_weighted
             )
 
 
@@ -300,6 +310,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            
 
             # Update epoch loss
             epoch_loss += weighted_rec_loss.item()
@@ -334,11 +345,11 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
 
         # Updated total loss calculation with all components
         avg_epoch_total_loss = (
-            0.55 * avg_epoch_rec_loss +
-            0.1 * avg_epoch_velocity_loss +
-            0.05 * avg_epoch_acceleration_loss +
-            0.15 * avg_epoch_pelvis_loss +
-            0.15 * avg_epoch_foot_skating_loss
+            FINAL_RECONSTRUCTION_LOSS_WEIGHT * avg_epoch_rec_loss +
+            FINAL_VELOCITY_LOSS_WEIGHT * avg_epoch_velocity_loss +
+            FINAL_ACCELERATION_LOSS_WEIGHT * avg_epoch_acceleration_loss +
+            FINAL_PELVIS_LOSS_WEIGHT * avg_epoch_pelvis_loss +
+            FINAL_FOOT_SKATING_LOSS_WEIGHT * avg_epoch_foot_skating_loss
         )
 
         # Log to console
@@ -364,6 +375,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             "Epoch Training Total Loss": avg_epoch_total_loss,
             "Epoch": epoch + 1,
         })
+        
+        scheduler.step()
 
 
         # Save checkpoint every 5 epochs
@@ -425,6 +438,13 @@ if __name__ == "__main__":
     logger.info(f"Mode: {MODE}")
     logger.info(f"Markers Type: {MARKERS_TYPE}")
     logger.info(f"Device: {DEVICE}")
+    logger.info(f"Pelvis Loss Weight: {PELVIS_LOSS_WEIGHT}")
+    logger.info(f"Leg Reconstruction Weight: {LEG_RECONSTRUCTION_WEIGHT}")
+    logger.info(f"Final Reconstruction Loss Weight: {FINAL_RECONSTRUCTION_LOSS_WEIGHT}")
+    logger.info(f"Final Velocity Loss Weight: {FINAL_VELOCITY_LOSS_WEIGHT}")
+    logger.info(f"Final Acceleration Loss Weight: {FINAL_ACCELERATION_LOSS_WEIGHT}")
+    logger.info(f"Final Pelvis Loss Weight: {FINAL_PELVIS_LOSS_WEIGHT}")
+    logger.info(f"Final Foot Skating Loss Weight: {FINAL_FOOT_SKATING_LOSS_WEIGHT}")
 
     wandb.init(entity='edward-effendy-tokyo-tech696', project='TemporalTransformer', name=exp_name, mode='disabled')
     wandb.config.update({
@@ -485,6 +505,8 @@ if __name__ == "__main__":
     wandb.config.update({"num_learnable_parameters": num_params})
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    #add cosine annealing scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10, eta_min=0)
 
     # Start training
     train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, exp_name)
