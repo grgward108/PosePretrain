@@ -276,6 +276,8 @@ class GRAB_DataLoader(data.Dataset):
         self.traj_gt_list = []
         self.joint_start_list_global = []
         self.joint_end_list_global = []
+        self.marker_start_list_global = []
+        self.marker_end_list_global = []
 
         self.male_body_model = get_body_model('smplx', smplx_model_path, 'male', self.clip_len, 'cpu')
         self.female_body_model = get_body_model('smplx', smplx_model_path, 'female', self.clip_len, 'cpu')
@@ -317,7 +319,9 @@ class GRAB_DataLoader(data.Dataset):
                 transf_rotmat = torch.stack([x_axis, y_axis, z_axis], dim=1)  # [3, 3]
                 joints = torch.matmul(joints - joints_frame0[0], transf_rotmat)  # [T(/bs), 25, 3]
                 transl_1 = - joints_frame0[0]
-                markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3]      
+                markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3] 
+                markers_floor_aligned = markers.clone()
+                markers_floor_aligned[:, :, 1] -= markers_floor_aligned[:, :, 1].min()     
                 
                 joints_floor_aligned = joints.clone()
                 joints_floor_aligned[:, :, 2] -= joints_floor_aligned[:, :, 2].min()
@@ -325,6 +329,9 @@ class GRAB_DataLoader(data.Dataset):
                 # Save the global context for start and end joints (floor-aligned)
                 self.joint_start_list_global.append(joints_floor_aligned[0].detach().cpu().numpy())  # First joint
                 self.joint_end_list_global.append(joints_floor_aligned[-1].detach().cpu().numpy())  # Last joint
+                self.marker_start_list_global.append(markers_floor_aligned[0].detach().cpu().numpy())  # First marker
+                self.marker_end_list_global.append(markers_floor_aligned[-1].detach().cpu().numpy())  # Last marker
+                
                  
             # Save trajectory
             x_axes = joints[:, 2, :] - joints[:, 1, :]  # [T, 3]
@@ -347,6 +354,8 @@ class GRAB_DataLoader(data.Dataset):
             global_y = global_y.unsqueeze(0).detach().cpu().numpy()
             rot_forward_x = rot_forward_x.unsqueeze(0).detach().cpu().numpy()
             rot_forward_y = rot_forward_y.unsqueeze(0).detach().cpu().numpy()
+            
+            global_pelvis = np.concatenate([global_x, global_y], axis=0)  # [2, 61]
 
             global_traj = np.concatenate([global_x, global_y, rot_forward_x, rot_forward_y], axis=0)  # [4, 61]
             # self.traj_gt_list.append(global_traj)
@@ -701,6 +710,8 @@ class GRAB_DataLoader(data.Dataset):
         
         joint_start_global = self.joint_start_list_global[index]
         joint_end_global = self.joint_end_list_global[index]
+        marker_start_global = self.marker_start_list_global[index]
+        marker_end_global = self.marker_end_list_global[index]
 
         return [
             clip_img_joints_np,
@@ -717,7 +728,9 @@ class GRAB_DataLoader(data.Dataset):
             joint_start,
             joint_end,
             joint_start_global,
-            joint_end_global
+            joint_end_global,
+            marker_start_global,
+            marker_end_global
         ]
 
 
