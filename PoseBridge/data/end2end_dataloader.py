@@ -77,7 +77,9 @@ def save_preprocessed_data(dataset, save_dir):
             joint_start,
             joint_end,
             joint_start_global,  # Added global start marker
-            joint_end_global     # Added global end marker
+            joint_end_global,
+            marker_start_global,  # Added global end marker
+            marker_end_global
         ) = data
         
         # Convert tensors to numpy arrays
@@ -97,6 +99,8 @@ def save_preprocessed_data(dataset, save_dir):
         joint_end = to_numpy(joint_end)
         joint_start_global = to_numpy(joint_start_global)  # Convert to numpy
         joint_end_global = to_numpy(joint_end_global)      # Convert to numpy
+        marker_start_global = to_numpy(marker_start_global)  # Convert to numpy
+        marker_end_global = to_numpy(marker_end_global)      # Convert to numpy
 
         # Save in sub-directory for dataset
         np.savez_compressed(
@@ -115,7 +119,9 @@ def save_preprocessed_data(dataset, save_dir):
             joint_start=joint_start,
             joint_end=joint_end,
             joint_start_global=joint_start_global,  # Save global start marker
-            joint_end_global=joint_end_global       # Save global end marker
+            joint_end_global=joint_end_global,
+            marker_start_global=marker_start_global,  # Save global end marker
+            marker_end_global=marker_end_global
         )
 
 
@@ -321,7 +327,7 @@ class GRAB_DataLoader(data.Dataset):
                 transl_1 = - joints_frame0[0]
                 markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3] 
                 markers_floor_aligned = markers.clone()
-                markers_floor_aligned[:, :, 1] -= markers_floor_aligned[:, :, 1].min()     
+                markers_floor_aligned[:, :, 2] -= markers_floor_aligned[:, :, 2].min()     
                 
                 joints_floor_aligned = joints.clone()
                 joints_floor_aligned[:, :, 2] -= joints_floor_aligned[:, :, 2].min()
