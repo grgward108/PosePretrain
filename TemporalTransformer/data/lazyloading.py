@@ -168,7 +168,7 @@ class MotionLoader(data.Dataset):
         with torch.no_grad():
             smplx_output = smplx_model(return_verts=False, return_joints=True, **body_param_)
             joints = smplx_output.joints[:, :25, :]  # [T, 25, 3]
-            
+
 
         # Convert to numpy for processing
         joints_np = joints.detach().cpu().numpy()
@@ -178,13 +178,7 @@ class MotionLoader(data.Dataset):
         # Align to floor
         joints_np[:, :, 1] -= joints_np[:, :, 1].min()
 
-        pelvis_global = joints_np[:, 0:1, :].copy()  # [T-1, 1, 3]
-        pelvis_global[:, :, 2] = 0  # Set the z-dimension (third dimension) to 0
-
-        # Calculate pelvis_global_velocity
-        pelvis_global_velocity = pelvis_global[1:] - pelvis_global[:-1]  # Velocity between consecutive frames
-        # Append the last frame velocity as zero (to maintain dimensions)
-        pelvis_global_velocity = np.concatenate([pelvis_global_velocity, np.zeros((1, 1, 3))], axis=0)
+        global_transl = joints_np[:, 0, :].copy() # add this to include global translation of pelvis 
 
         # Add reference joint: from the original code snippet logic
         reference = joints_np[:, 0] * np.array([1, 0, 1])
@@ -213,7 +207,8 @@ class MotionLoader(data.Dataset):
         # Remove last frame and the reference joint column
         # Original code: cur_body = cur_body[:-1, 1:, :]
         cur_body = cur_body[:-1, 1:, :]
-        cur_body = np.concatenate([pelvis_global[:-1], pelvis_global_velocity[:-1], cur_body], axis=1)  # [T-1, num_joints+2, 3]
+        global_transl = global_transl[:-1]  # Ensure same length as cur_body
+        cur_body = np.concatenate([global_transl[:, np.newaxis, :], cur_body], axis=1)  # [T-1, 26, 3]
 
         # Normalize if stats are available
         if self.normalize and self.Xmean is not None and self.Xstd is not None:
@@ -226,5 +221,3 @@ class MotionLoader(data.Dataset):
             masked_clip, mask = self.apply_masking(masked_clip)
         else:
             mask = torch.ones(original_clip.shape[0], dtype=torch.float32)
-
-        return masked_clip, mask, original_clip
