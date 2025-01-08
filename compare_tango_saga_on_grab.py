@@ -321,6 +321,7 @@ def validate_combined(model, dataloader, DEVICE, traj_stats, markers_stats, save
     with torch.no_grad():
         for i, (clip_img_joints, clip_img_markers, slerp_img, traj, joint_start_global, joint_end_global, marker_start_global, marker_end_global,  *_) in enumerate(tqdm(dataloader, desc="Validating")):
             slerp_img = slerp_img.to(DEVICE, dtype=torch.float32)
+            print("slerp_img shape: ", slerp_img.shape)
             temp_original_joints = clip_img_joints.to(DEVICE, dtype=torch.float32)
             lift_original_markers = clip_img_markers.to(DEVICE, dtype=torch.float32)
             marker_start = marker_start_global.to(DEVICE)
@@ -396,12 +397,13 @@ def validate_combined(model, dataloader, DEVICE, traj_stats, markers_stats, save
             traj = torch.cat([traj, torch.zeros(traj.shape[0], traj.shape[1], 1, 1, device=DEVICE)], dim=-1)  # Add z dimension
             interp_pelvis = interp_pelvis.unsqueeze(2)  # Add the singleton dimension for [batch_size, frames, 1, 2]
             interp_pelvis = torch.cat([interp_pelvis, torch.zeros(interp_pelvis.shape[0], interp_pelvis.shape[1], 1, 1, device=DEVICE)], dim=-1)
-            temp_original_joints = torch.cat([traj, temp_original_joints], dim=2)  # Concatenate without unsqueezing
+            # temp_original_joints = torch.cat([traj, temp_original_joints], dim=2)  # Concatenate without unsqueezing
+            print("temp_original_joints shape after concat with traj: ", temp_original_joints.shape)
             lift_original_markers = torch.cat([traj, lift_original_markers], dim=2)  # Concatenate 
             print("lift_original_markers shape after concat with traj: ", lift_original_markers.shape)
 
             # Prepend interp_pelvis to slerp_img
-            slerp_img = torch.cat([interp_pelvis, slerp_img], dim=2)  # Concatenate without unsqueezing
+            
             print("slerp_img shape: ", slerp_img.shape)
             # Forward pass
             temp_filled_joints, lift_predicted_markers = model(slerp_img)
@@ -546,8 +548,8 @@ def main(exp_name):
         num_heads=4,
     ).to(DEVICE)
 
-    temporal_checkpoint_path = 'finetune_temporal_log/withpelvis_fromscratch/epoch_100.pth'
-    liftup_checkpoint_path = 'finetune_liftup_log/test4_fromscratch/epoch_55.pth'
+    temporal_checkpoint_path = 'finetune_temporal_log/testdifferentweights/epoch_100.pth'
+    liftup_checkpoint_path = 'finetune_liftup_log/test3/epoch_100.pth'
     traj_stats = np.load(args.traj_stats_path)
     markers_stats = np.load(args.markers_stats_dir)
 
