@@ -56,6 +56,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     model.eval()
     val_loss = 0.0
     velocity_loss_total = 0.0
+    acceleration_loss_total = 0.0
     pelvis_loss_total = 0.0
     foot_skating_loss_total = 0.0
     first_batch_saved = False
@@ -109,10 +110,17 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             raw_velocity_loss = velocity_diff.sum()
             normalized_velocity_loss = raw_velocity_loss / velocity_diff.numel()
 
+            # Acceleration smoothness loss
+            original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
+            reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
+            acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2
+            normalized_acceleration_loss = acceleration_diff.sum() / acceleration_diff.numel()
+
             
             # Accumulate losses
             val_loss += normalized_rec_loss.item()
             velocity_loss_total += normalized_velocity_loss.item()
+            acceleration_loss_total += normalized_acceleration_loss.item()
             pelvis_loss_total += pelvis_loss_weighted.item()
             foot_skating_loss_total += foot_skating_loss.item()
 
@@ -132,12 +140,14 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
     avg_rec_loss = val_loss / len(val_loader)
     avg_velocity_loss = velocity_loss_total / len(val_loader)
     avg_pelvis_loss = pelvis_loss_total / len(val_loader)
+    avg_acceleration_loss = acceleration_loss_total / len(val_loader)
     avg_foot_skating_loss = foot_skating_loss_total / len(val_loader)
 
     total_loss = (
         0.5 * avg_rec_loss +
         0.2 * avg_velocity_loss +
         0.1 * avg_pelvis_loss +
+        0.1 * avg_acceleration_loss +
         0.1 * avg_foot_skating_loss
     )
 
@@ -146,6 +156,7 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
         wandb.log({
             "Validation Loss (Reconstruction)": avg_rec_loss,
             "Validation Loss (Velocity)": avg_velocity_loss,
+            "Validation Loss (Acceleration)": avg_acceleration_loss,
             "Validation Loss (Pelvis)": avg_pelvis_loss,
             "Validation Loss (Foot Skating)": avg_foot_skating_loss,
             "Validation Loss (Total)": total_loss,
@@ -162,6 +173,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
         epoch_loss = 0.0
         velocity_loss_total = 0.0
         pelvis_loss_total = 0.0
+        acceleration_loss_total = 0.0
         foot_skating_loss_total = 0.0  # Track foot skating loss for the epoch
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}") if is_rank_0 else train_loader
@@ -214,12 +226,20 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             raw_velocity_loss = velocity_diff.sum()
             normalized_velocity_loss = raw_velocity_loss / velocity_diff.numel()
 
+            # Acceleration smoothness loss
+            original_acceleration = original_velocity[:, :, :, 1:] - original_velocity[:, :, :, :-1]
+            reconstructed_acceleration = reconstructed_velocity[:, :, :, 1:] - reconstructed_velocity[:, :, :, :-1]
+            acceleration_diff = (original_acceleration - reconstructed_acceleration) ** 2
+            raw_acceleration_loss = acceleration_diff.sum()
+            normalized_acceleration_loss = raw_acceleration_loss / acceleration_diff.numel()
+
             # Combine all losses
             total_loss = (
                 0.5 * normalized_rec_loss + 
                 0.2 * normalized_velocity_loss + 
                 0.1 * pelvis_loss_weighted +
-                0.1 * foot_skating_loss
+                0.1 * foot_skating_loss +
+                0.1 * normalized_acceleration_loss 
             )
 
             # Backward pass and optimization
@@ -230,6 +250,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             # Update epoch losses
             epoch_loss += normalized_rec_loss.item()
             velocity_loss_total += normalized_velocity_loss.item()
+            acceleration_loss_total += normalized_acceleration_loss.item()
             pelvis_loss_total += pelvis_loss_weighted.item()
             foot_skating_loss_total += foot_skating_loss.item()
 
@@ -238,6 +259,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
                 progress_bar.set_postfix({
                     "Reconstruction Loss": normalized_rec_loss.item(),
                     "Velocity Loss": normalized_velocity_loss.item(),
+                    "Acceleration Loss": normalized_acceleration_loss.item(),
                     "Pelvis Loss": pelvis_loss_weighted.item(),
                     "Foot Skating Loss": foot_skating_loss.item(),
                     "Total Loss": total_loss.item()
@@ -253,11 +275,13 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
         # Log average training losses for the epoch
         avg_epoch_rec_loss = epoch_loss / len(train_loader)
         avg_epoch_velocity_loss = velocity_loss_total / len(train_loader)
+        avg_epoch_acceleration_loss = acceleration_loss_total / len(train_loader)
         avg_epoch_pelvis_loss = pelvis_loss_total / len(train_loader)
         avg_epoch_foot_skating_loss = foot_skating_loss_total / len(train_loader)
         avg_epoch_total_loss = (
             0.5 * avg_epoch_rec_loss +
             0.2 * avg_epoch_velocity_loss +
+            0.1 * avg_epoch_acceleration_loss +
             0.1 * avg_epoch_pelvis_loss +
             0.1 * avg_epoch_foot_skating_loss
         )
@@ -267,6 +291,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
             f"Reconstruction Loss: {avg_epoch_rec_loss:.4f}, "
             f"Velocity Loss: {avg_epoch_velocity_loss:.4f}, "
             f"Pelvis Loss: {avg_epoch_pelvis_loss:.4f}, "
+            f"Acceleration Loss: {avg_epoch_acceleration_loss:.4f}, "
             f"Foot Skating Loss: {avg_epoch_foot_skating_loss:.4f}, "
             f"Total Loss: {avg_epoch_total_loss:.4f}"
         )
@@ -274,6 +299,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir):
         wandb.log({
             "Training Loss (Epoch Reconstruction)": avg_epoch_rec_loss,
             "Training Loss (Epoch Velocity)": avg_epoch_velocity_loss,
+            "Training Loss (Epoch Acceleration)": avg_epoch_acceleration_loss,
             "Training Loss (Epoch Pelvis)": avg_epoch_pelvis_loss,
             "Training Loss (Epoch Foot Skating)": avg_epoch_foot_skating_loss,
             "Training Loss (Epoch Total)": avg_epoch_total_loss,
