@@ -98,9 +98,25 @@ def validate(model, val_loader, mask_ratio, device, save_reconstruction=False, s
             # Step 3: Compute foot skating loss
             # Include time dimension when selecting foot joints
             feet_indices = [7, 8, 10, 11]  # Foot joint indices
-            foot_positions = restored_joints[:, :, feet_indices, :]  # Correct slicing: keep time and feet
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]  # Temporal difference
-            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()  # Foot skating loss
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Shape: (batch, time, feet, 3)
+
+            # Example thresholds for detecting foot contact (tuned for your data)
+            velocity_threshold = 0.01  # Low velocity in 3D space
+            height_threshold = 0.05   # Close to the ground
+
+            # Calculate velocity magnitude
+            foot_velocity = foot_positions[:, 1:, :, :] - foot_positions[:, :-1, :, :]  # Temporal difference
+            foot_velocity_magnitude = (foot_velocity ** 2).sum(dim=-1).sqrt()  # Shape: (batch, time-1, feet)
+
+            # Detect contact based on velocity and height
+            contact_mask = (foot_velocity_magnitude < velocity_threshold) & (foot_positions[:, :-1, :, 2] < height_threshold)  # Shape: (batch, time-1, feet)
+
+            # Apply the loss only to frames where feet are in contact
+            # Expand contact_mask to match the shape of foot_velocity
+            contact_mask = contact_mask[..., None]  # Shape: (batch, time-1, feet, 1)
+
+            # Compute loss only for contact frames
+            foot_skating_loss = ((foot_velocity ** 2).sum(dim=-1) * contact_mask.squeeze(-1)).sum() / contact_mask.sum()
 
 
             # Velocity loss
