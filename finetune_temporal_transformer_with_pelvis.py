@@ -29,11 +29,11 @@ TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_fixglobalpelvi
 PELVIS_LOSS_WEIGHT = 4.0
 LEG_RECONSTRUCTION_WEIGHT = 4.0
 
-FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.65
-FINAL_VELOCITY_LOSS_WEIGHT = 0.1
-FINAL_ACCELERATION_LOSS_WEIGHT = 0.00
+FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.5
+FINAL_VELOCITY_LOSS_WEIGHT = 0.2
+FINAL_ACCELERATION_LOSS_WEIGHT = 0.1
 FINAL_PELVIS_LOSS_WEIGHT = 0.10
-FINAL_FOOT_SKATING_LOSS_WEIGHT = 0.15
+FINAL_FOOT_SKATING_LOSS_WEIGHT = 0.1
 
 
 grab_dir = '../../../data/edwarde/dataset/include_global_traj'
@@ -147,11 +147,19 @@ def validate(model, val_loader, device, save_reconstruction=False, save_dir=None
             restored_joints = local_joints + global_translation  # Restore global context
 
             # Step 3: Compute foot skating loss
-            # Compute foot skating loss
-            feet_indices = [7, 8, 10, 11]
-            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
-            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+            # Include time dimension when selecting foot joints
+            feet_indices = [7, 8, 10, 11]  # Foot joint indices
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Shape: (batch, time, feet, 3)
+            velocity_threshold = 0.01  # Low velocity in 3D space
+            height_threshold = 0.05   # Close to the ground
+            # Calculate velocity magnitude
+            foot_velocity = foot_positions[:, 1:, :, :] - foot_positions[:, :-1, :, :]  # Temporal difference
+            foot_velocity_magnitude = (foot_velocity ** 2).sum(dim=-1).sqrt()  # Shape: (batch, time-1, feet)
+            # Detect contact based on velocity and height
+            contact_mask = (foot_velocity_magnitude < velocity_threshold) & (foot_positions[:, :-1, :, 2] < height_threshold)  # Shape: (batch, time-1, feet)
+            contact_mask = contact_mask[..., None]  # Shape: (batch, time-1, feet, 1)
+            # Compute loss only for contact frames
+            foot_skating_loss = ((foot_velocity ** 2).sum(dim=-1) * contact_mask.squeeze(-1)).sum() / contact_mask.sum()
 
             # Accumulate losses
             val_loss += weighted_rec_loss.item()
@@ -287,11 +295,19 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             restored_joints = local_joints + global_translation  # Restore global context
 
             # Step 3: Compute foot skating loss
-            # Compute foot skating loss
-            feet_indices = [7, 8, 10, 11]
-            foot_positions = restored_joints[:, :, feet_indices, :]  # Use restored joints only
-            foot_velocity = foot_positions[:, 1:, :] - foot_positions[:, :-1, :]
-            foot_skating_loss = (foot_velocity ** 2).sum() / foot_velocity.numel()
+            # Include time dimension when selecting foot joints
+            feet_indices = [7, 8, 10, 11]  # Foot joint indices
+            foot_positions = restored_joints[:, :, feet_indices, :]  # Shape: (batch, time, feet, 3)
+            velocity_threshold = 0.01  # Low velocity in 3D space
+            height_threshold = 0.05   # Close to the ground
+            # Calculate velocity magnitude
+            foot_velocity = foot_positions[:, 1:, :, :] - foot_positions[:, :-1, :, :]  # Temporal difference
+            foot_velocity_magnitude = (foot_velocity ** 2).sum(dim=-1).sqrt()  # Shape: (batch, time-1, feet)
+            # Detect contact based on velocity and height
+            contact_mask = (foot_velocity_magnitude < velocity_threshold) & (foot_positions[:, :-1, :, 2] < height_threshold)  # Shape: (batch, time-1, feet)
+            contact_mask = contact_mask[..., None]  # Shape: (batch, time-1, feet, 1)
+            # Compute loss only for contact frames
+            foot_skating_loss = ((foot_velocity ** 2).sum(dim=-1) * contact_mask.squeeze(-1)).sum() / contact_mask.sum()
             
             pelvis_loss_total += pelvis_loss_weighted.item()
             foot_skating_loss_total += foot_skating_loss.item()
