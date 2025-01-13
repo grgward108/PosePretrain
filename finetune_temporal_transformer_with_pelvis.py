@@ -24,16 +24,16 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 26 # change to 26 because we add one more pelvis global joint
-TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_fixglobalpelvis.pth'
+TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_abb_no_acc_no_footskat.pth'
 
 PELVIS_LOSS_WEIGHT = 4.0
 LEG_RECONSTRUCTION_WEIGHT = 4.0
 
-FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.5
-FINAL_VELOCITY_LOSS_WEIGHT = 0.2
-FINAL_ACCELERATION_LOSS_WEIGHT = 0.1
+FINAL_RECONSTRUCTION_LOSS_WEIGHT = 0.6
+FINAL_VELOCITY_LOSS_WEIGHT = 0.1
+FINAL_ACCELERATION_LOSS_WEIGHT = 0.0
 FINAL_PELVIS_LOSS_WEIGHT = 0.10
-FINAL_FOOT_SKATING_LOSS_WEIGHT = 0.1
+FINAL_FOOT_SKATING_LOSS_WEIGHT = 0
 
 
 grab_dir = '../../../data/edwarde/dataset/include_global_traj'
@@ -260,7 +260,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             pelvis_original = original_clip[:, :, 0, :]
             pelvis_loss = ((pelvis_output - pelvis_original) ** 2).mean()
             pelvis_loss_weighted = PELVIS_LOSS_WEIGHT * pelvis_loss
-            
+
             # Define leg indices
             leg_indices = [1, 2, 4, 5, 7, 8, 10, 11, 18, 19, 20, 21]
 
@@ -286,7 +286,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             # Leg-specific reconstruction loss (for logging)
             leg_loss = ((outputs[:, :, leg_indices, :] - original_clip[:, :, leg_indices, :]) ** 2).mean()
             leg_loss_total += leg_loss.item()
-            
+
             # Step 2: Global context restoration for foot skating loss
             global_translation = outputs[:, :, 0:1, :]
 
@@ -298,7 +298,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             # Include time dimension when selecting foot joints
             feet_indices = [7, 8, 10, 11]  # Foot joint indices
             foot_positions = restored_joints[:, :, feet_indices, :]  # Shape: (batch, time, feet, 3)
-            velocity_threshold = 0.01  # Low velocity in 3D space
+            velocity_threshold = 0.02  # Low velocity in 3D space
             height_threshold = 0.05   # Close to the ground
             # Calculate velocity magnitude
             foot_velocity = foot_positions[:, 1:, :, :] - foot_positions[:, :-1, :, :]  # Temporal difference
@@ -308,7 +308,8 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             contact_mask = contact_mask[..., None]  # Shape: (batch, time-1, feet, 1)
             # Compute loss only for contact frames
             foot_skating_loss = ((foot_velocity ** 2).sum(dim=-1) * contact_mask.squeeze(-1)).sum() / contact_mask.sum()
-            
+
+
             pelvis_loss_total += pelvis_loss_weighted.item()
             foot_skating_loss_total += foot_skating_loss.item()
 
@@ -326,7 +327,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
-            
+
 
             # Update epoch loss
             epoch_loss += weighted_rec_loss.item()
@@ -391,7 +392,7 @@ def train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, ex
             "Epoch Training Total Loss": avg_epoch_total_loss,
             "Epoch": epoch + 1,
         })
-        
+
         scheduler.step()
 
 
@@ -501,7 +502,7 @@ if __name__ == "__main__":
     if os.path.exists(TEMPORAL_CHECKPOINT_PATH):
         logger.info(f"Loading model from checkpoint: {TEMPORAL_CHECKPOINT_PATH}")
         checkpoint = torch.load(TEMPORAL_CHECKPOINT_PATH, map_location=DEVICE)
-        
+
         # Fix keys with "module." prefix
         state_dict = checkpoint['model_state_dict']
         new_state_dict = {}
@@ -526,4 +527,3 @@ if __name__ == "__main__":
 
     # Start training
     train(model, optimizer, train_loader, val_loader, logger, checkpoint_dir, exp_name)
-
