@@ -471,7 +471,7 @@ def main(exp_name):
         num_heads=4,
     ).to(DEVICE)
 
-    temporal_checkpoint_path = 'finetune_temporal_log/abb_no_footskat_pretrain/epoch_100.pth'
+    temporal_checkpoint_path = 'finetune_temporal_log/abb_no_acc_no_footskat/epoch_100.pth'
     liftup_checkpoint_path = 'finetune_liftup_log/test4_fromscratch/epoch_55.pth'
 
     if os.path.exists(temporal_checkpoint_path):
