@@ -68,6 +68,41 @@ class GRAB_DataLoader(data.Dataset):
 
         self.npz_fnames = []
         self.n_samples = 0
+        
+    def divide_clip(self, dataset_name='HumanEva', amass_dir=None, stride=None):
+        npz_fnames = sorted(glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz')))
+        cnt_sub_clip = 0
+
+        for npz_fname in npz_fnames:
+            cdata = np.load(npz_fname)
+            fps = int(cdata['mocap_framerate'])
+
+            if fps == 150:
+                sample_rate = 5
+            elif fps == 120:
+                sample_rate = 4
+            elif fps == 60:
+                sample_rate = 2
+            else:
+                # Skip other FPS
+                cdata.close()
+                continue
+            cdata.close()
+
+            clip_len = self.clip_seconds * fps + sample_rate + 1
+            stride_ = stride or clip_len
+            # We only store metadata here, not loading now
+            with np.load(npz_fname) as cdata:
+                N = len(cdata['poses'])
+            if N >= clip_len:
+                for start_idx in range(0, N - clip_len + 1, stride_):
+                    self.data_metadata_list.append({
+                        'npz_fname': npz_fname,
+                        'start_idx': start_idx,
+                        'sample_rate': sample_rate,
+                        'fps': fps
+                    })
+                    cnt_sub_clip += 1
 
     def read_data(self, amass_datasets, amass_dir, stride=1):
         for dataset_name in amass_datasets:
@@ -241,7 +276,7 @@ class GRAB_DataLoader(data.Dataset):
         slerp_img = torch.from_numpy(slerp_img).float()
 
         # Convert final clip to tensor
-        clip_img_joints = torch.from_numpy(joints_np).float().permute(2, 1, 0)  # [3, joints, T-1]
+        clip_img_joints = torch.from_numpy(joints_np[:, :25, :]).float().permute(2, 1, 0)
         clip_img_markers = torch.from_numpy(markers_np).float().permute(2, 1, 0) # [3, markers, T-1]
 
         return clip_img_joints.numpy(), clip_img_markers.numpy(), slerp_img.numpy()

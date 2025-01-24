@@ -169,7 +169,7 @@ def set_initial_pose_2(args, end_smplx, joint_end, markers_ids):
     direction_vector = direction_vector / (norms + 1e-8)  # Avoid division by zero
 
     # Set displacement to 0.5 meters forward along the direction vector
-    displacement = 1 * direction_vector  # Shape: [n, 3]
+    displacement = 0.5 * direction_vector  # Shape: [n, 3]
     
     reference_joint = np.array(reference_joint)
     displacement = np.array(displacement)
@@ -295,7 +295,7 @@ if __name__ == "__main__":
 
     # main(args)
     
-    load_path = '/home/edwarde/PosePretrain/test_02/GraspPose/camera/fitting_results.npz'
+    load_path = '/home/edwarde/PosePretrain/evaluation_01/GraspPose/camera/fitting_results.npz'
     markers_ids= get_markers_ids('f15_p22')
 
     end_data, end_smplx, marker_end, joint_end, object_transl_0, object_global_orient_0 = load_ending_pose(args, load_path)
@@ -313,6 +313,18 @@ if __name__ == "__main__":
 
     new_joint_start = torch.bmm(joint_start, start_transform.transpose(1, 2))
     new_joint_end = torch.bmm(joint_end, end_transform.transpose(1, 2))
+    
+    translation_offset_x = new_joint_start[:, 0:1, 0]  # Only x-coordinate
+    translation_offset_2_x = new_joint_end[:, 0:1, 0]  # Only x-coordinate
+
+
+    # Shift joint_start to align x to 0
+    new_joint_start_adjusted = new_joint_start.clone()  # Create a copy to avoid modifying the original tensor
+    new_joint_start[:, :, 0] -= translation_offset_x  # Subtract only the x-offset
+    
+    new_joint_end_adjusted = new_joint_end.clone()  # Create a copy to avoid modifying the original tensor
+    new_joint_end[:, :, 0] -= translation_offset_2_x  # Subtract only the x-offset
+
     
     translation_offset = new_joint_start[:, 0:1, :2]  # Extract the x, y coordinates of the reference joint (first joint)
 
@@ -387,7 +399,7 @@ if __name__ == "__main__":
         num_heads=4,
     ).to(DEVICE)
     
-    temporal_checkpoint_path = 'finetune_temporal_log/testdifferentweights/epoch_100.pth'
+    temporal_checkpoint_path = '../../../data/edwarde/dataset/finetune_temporal_log/testdifferentweights/epoch_100.pth'
     liftup_checkpoint_path = 'finetune_liftup_log/test3/epoch_100.pth'
 
     if os.path.exists(temporal_checkpoint_path):

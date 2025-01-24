@@ -198,7 +198,7 @@ class MotionLoader(data.Dataset):
 
             # Normalize global translation/orientation (if enabled)
             if global_rot_norm:
-                body_param_['transl'] -= body_param_['transl'][0]  # Center pelvis at origin
+                body_param_['transl'] -= body_param_['transl'][0].clone()  # Center pelvis at origin
                 body_param_['transl'][:, 1] += 0.4  # Adjust height for visualization
 
             # Generate joints using SMPL-X
@@ -216,7 +216,9 @@ class MotionLoader(data.Dataset):
             joints_np[:, :, 1] -= joints_np[:, :, 1].min()  # Place on floor
             
             # Extract pelvis global translation before reducing to local motion
-            pelvis_global = joints_np[:-1, 0:1, :].copy()  # [T-1, 1, 3]
+            pelvis_global = joints_np[:, 0:1, :].copy()  # [T-1, 1, 3]
+            pelvis_global[:, :, 2] = 0  # Set the z-dimension (third dimension) to 0
+
             
             reference = joints_np[:, 0] * np.array([1, 0, 1])  # Add reference joint
             cur_body = np.concatenate([reference[:, np.newaxis], joints_np], axis=1)

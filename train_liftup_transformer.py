@@ -80,13 +80,26 @@ def train(model, dataloader, optimizer, epoch, logger, DEVICE):
 
         # Forward pass
         reconstructed_markers = model(joints)
-        # Loss computation
-        loss = criterion(reconstructed_markers, original_markers)
 
-        # Backward pass
+        # Define weights for specific marker indices
+        weights = torch.ones_like(original_markers).to(DEVICE)  # Initialize all weights as 1
+
+        # Assign higher weights to the right-hand markers
+        right_hand_indices = torch.cat([torch.arange(64, 79), torch.arange(-22, 0)])  # Right-hand indices
+        weights[:, right_hand_indices, :] = 3.0  # Give higher weight right-hand markers
+
+        # Compute the per-marker loss
+        loss_per_marker = (reconstructed_markers - original_markers) ** 2  # MSE loss per marker
+
+        # Apply the weights
+        weighted_loss = loss_per_marker * weights
+
+        # Compute the final weighted loss (mean or sum)
+        loss = weighted_loss.mean()  # Use `.mean()` or `.sum()` depending on your preference
+
+        # Backpropagation
         loss.backward()
         optimizer.step()
-
         epoch_loss += loss.item()
 
     avg_loss = epoch_loss / len(dataloader)

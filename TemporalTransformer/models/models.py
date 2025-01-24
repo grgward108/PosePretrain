@@ -4,7 +4,7 @@ import math
 
 
 class TemporalTransformer(nn.Module):
-    def __init__(self, dim_in=3, dim_feat=256, dim_out=3, num_heads=8, depth=5, num_joints=17, maxlen=243, drop_rate=0.1, mask_token_value=0.0):
+    def __init__(self, dim_in=3, dim_feat=256, dim_out=3, num_heads=8, depth=5, num_joints=25, maxlen=243, drop_rate=0.1, mask_token_value=0.0):
         super(TemporalTransformer, self).__init__()
         self.dim_in = dim_in
         self.dim_feat = dim_feat
@@ -43,7 +43,8 @@ class TemporalTransformer(nn.Module):
         B, T, J, C = x.shape
         
         # Embed joints
-        x = self.joint_embed(x.view(B * T, J, C))  # (B*T, J, dim_feat)
+        x = self.joint_embed(x.contiguous().view(B * T, J, C))  # (B*T, J, dim_feat)
+
         x = x.view(B, T, J, -1) + self.temp_embed[:, :T, :, :] + self.joint_embed_pos[:, :J, :]
         
         # Apply masking (replace masked positions with a mask token)
@@ -85,11 +86,6 @@ class TemporalTransformerBlock(nn.Module):
         # Reshape back to original shape
         x = x.view(B, J, T, C).permute(0, 2, 1, 3).contiguous()  # Restore original shape
         return x
-
-
-
-
-
 
 class AttentionBlock(nn.Module):
     def __init__(self, dim_feat, num_heads, drop_rate):

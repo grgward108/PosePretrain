@@ -32,41 +32,32 @@ class LiftUpTransformer(nn.Module):
         """
         Forward pass for the LiftUpTransformer.
         Args:
-            joints (Tensor): Shape (batch_size, num_joints, input_dim)
+            joints (Tensor): Shape (batch_size * num_frames, num_joints, input_dim=3)
 
         Returns:
             Tensor: Predicted markers, shape (batch_size, num_markers, input_dim)
         """
-        batch_size, num_joints, _ = joints.shape
+        assert joints.ndim == 3, f"Expected input with 3 dimensions, but got shape {joints.shape}"
+        batch_size_times_frames, num_joints, input_dim = joints.shape
+        assert input_dim == 3, f"Expected last dimension to be 3 (x, y, z coordinates), but got {input_dim}"
 
         # Embed input joints
-        joints_embedded = self.joint_embedding(joints)  # Shape: (batch_size, num_joints, embed_dim)
+        joints_embedded = self.joint_embedding(joints)  # Shape: (batch_size * num_frames, num_joints, embed_dim)
 
-        # Add learnable relative positional encodings
-        relative_pos_enc = self.relative_position_encoding.unsqueeze(0)  # Shape: (1, num_joints, num_joints, embed_dim)
-        joints_embedded = joints_embedded.unsqueeze(2)  # Shape: (batch_size, num_joints, 1, embed_dim)
-        joints_embedded = joints_embedded + relative_pos_enc  # Shape: (batch_size, num_joints, num_joints, embed_dim)
+        # Positional encoding and transformer encoder
+        joints_embedded += self.relative_position_encoding.mean(dim=1)  # Simplified positional encoding
+        encoded_joints = self.transformer_encoder(joints_embedded)  # Shape: (batch_size * num_frames, num_joints, embed_dim)
 
-        # Aggregate over relative positions
-        joints_embedded = joints_embedded.mean(dim=2)  # Shape: (batch_size, num_joints, embed_dim)
-
-        # Ensure joints_embedded is 3D
-        joints_embedded = joints_embedded.view(batch_size, num_joints, -1)  # Safeguard for 3D shape
-
-        # Transformer encoder
-        encoded_joints = self.transformer_encoder(joints_embedded)  # Shape: (batch_size, num_joints, embed_dim)
-
-        # Marker queries
-        marker_queries = self.marker_queries.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Cross-attention
+        # Cross-attention and marker prediction
+        marker_queries = self.marker_queries.unsqueeze(0).expand(batch_size_times_frames, -1, -1)
         markers, _ = self.cross_attention(
             marker_queries.transpose(0, 1),
             encoded_joints.transpose(0, 1),
             encoded_joints.transpose(0, 1),
         )
-        markers = markers.transpose(0, 1)  # Shape: (batch_size, num_markers, embed_dim)
+        markers = markers.transpose(0, 1)  # Shape: (batch_size * num_frames, num_markers, embed_dim)
 
         # Project to 3D space
-        markers_3d = self.output_projection(markers)  # Shape: (batch_size, num_markers, input_dim)
+        markers_3d = self.output_projection(markers)  # Shape: (batch_size * num_frames, num_markers, input_dim)
         return markers_3d
+

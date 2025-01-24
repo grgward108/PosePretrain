@@ -306,60 +306,6 @@ class GRAB_DataLoader(data.Dataset):
             global_traj = np.concatenate([global_x, global_y, rot_forward_x, rot_forward_y], axis=0) # [4, 61]
             # self.traj_gt_list.append(global_traj)
 
-            ######## obtain binary contact labels
-            ##1
-            # velocity criteria
-            left_heel_vel = torch.norm((joints[1:, 7:8] - joints[0:-1, 7:8]) * self.clip_fps, dim=-1)  # [T-1, 1]
-            right_heel_vel = torch.norm((joints[1:, 8:9] - joints[0:-1, 8:9]) * self.clip_fps, dim=-1)
-            left_toe_vel = torch.norm((joints[1:, 10:11] - joints[0:-1, 10:11]) * self.clip_fps, dim=-1)
-            right_toe_vel = torch.norm((joints[1:, 11:12] - joints[0:-1, 11:12]) * self.clip_fps, dim=-1)
-
-            foot_joints_vel = torch.cat([left_heel_vel, right_heel_vel, left_toe_vel, right_toe_vel],
-                                        dim=-1)  # [T-1, 4]
-
-            is_contact = torch.abs(foot_joints_vel) < 0.22  # todo: set contact threshold speed
-            contact_lbls = torch.zeros([joints.shape[0], 4]).to(device)  # all -1, [T, 4]
-            contact_lbls[0:-1, :][is_contact == True] = 1.0  # 0/1, 1 if contact for first T-1 frames
-
-            # z height criteria
-            z_thres = torch.min(joints[:, :, -1]) + 0.10   # todo: set contact threshold speed
-            foot_joints = torch.cat([joints[:, 7:8], joints[:, 8:9], joints[:, 10:11], joints[:, 11:12]],
-                                    dim=-2)  # [T, 4, 3]
-            thres_lbls = (foot_joints[:, :, 2] < z_thres).float()  # 0/1, [T, 4]
-
-            # combine 2 criterias
-            contact_lbls = contact_lbls * thres_lbls
-            contact_lbls[-1, :] = thres_lbls[-1, :]  # last frame contact lbl: only look at z height
-            # contact_lbls[contact_lbls == 0] = -1.0  # tensor, 1 for contact, -1 for no contact
-            contact_lbls = contact_lbls.detach().cpu().numpy()
-
-            ##2
-            # velocity criteria
-            left_heel_vel = torch.norm((markers[1:, 9:10] - markers[0:-1, 9:10]) * self.clip_fps, dim=-1)  # [T-1, 1]         ################  TO CHANGE AND FIND FEET MARKERS INDEX
-            right_heel_vel = torch.norm((markers[1:, 25:26] - markers[0:-1, 25:26]) * self.clip_fps, dim=-1) 
-            left_toe_vel = torch.norm((markers[1:, 40:41] - markers[0:-1, 40:41]) * self.clip_fps, dim=-1)
-            right_toe_vel = torch.norm((markers[1:, 43:44] - markers[0:-1, 43:44]) * self.clip_fps, dim=-1)
-
-
-            foot_markers_vel = torch.cat([left_heel_vel, right_heel_vel, left_toe_vel, right_toe_vel],
-                                        dim=-1)  # [T-1, 4]
-
-            is_contact = torch.abs(foot_markers_vel) < 0.22  # todo: set contact threshold speed
-            contact_lbls = torch.zeros([markers.shape[0], 4]).to(device)  # all -1, [T, 4]
-            contact_lbls[0:-1, :][is_contact == True] = 1.0  # 0/1, 1 if contact for first T-1 frames
-
-            # z height criteria
-            z_thres = torch.min(markers[:, :, -1]) + 0.10  # todo: set contact threshold speed
-            foot_markers = torch.cat([markers[:, 9:10], markers[:, 25:26], markers[:, 40:41], markers[:, 43:44]],
-                                        dim=-2)  # [T, 4, 3]
-            thres_lbls = (foot_markers[:, :, 2] < z_thres).float()  # 0/1, [T, 4]
-
-            # combine 2 criterias
-            contact_lbls = contact_lbls * thres_lbls
-            contact_lbls[-1, :] = thres_lbls[-1, :]  # last frame contact lbl: only look at z height
-            contact_lbls = contact_lbls.detach().cpu().numpy()
-
-
             ######## get body representation
             body_joints = joints[:, 0:25]    # [T, 25, 3]  root(1) + body(21) + jaw/leye/reye(3)
             hand_joints = joints[:, 25:55]   # [T, 30, 3]
@@ -471,36 +417,9 @@ class GRAB_DataLoader(data.Dataset):
 
                     cur_body = np.concatenate([channel_local, channel_global_x, channel_global_y, channel_global_r], axis=0)  # [4, T-1, d]
 
-            ############## get smplx gt transform
-            # + transl_1, *transf_rotmat, -z_transl(in z axis)
-            transf_matrix_1 = torch.tensor([[1, 0, 0, transl_1[0]],
-                                            [0, 1, 0, transl_1[1]],
-                                            [0, 0, 1, transl_1[2]],
-                                            [0, 0, 0, 1]])
-            transf_matrix_2 = torch.zeros(4,4)
-            transf_matrix_2[0:3, 0:3] = transf_rotmat.T
-            transf_matrix_2[-1, -1] = 1
-
-            transf_matrix_3 = torch.tensor([[1, 0, 0, 0],
-                                            [0, 1, 0, 0],
-                                            [0, 0, 1, -z_transl],
-                                            [0, 0, 0, 1]])
-
-            transf_matrix_smplx = torch.matmul(transf_matrix_3, torch.matmul(transf_matrix_2, transf_matrix_1)).detach()  # [4, 4]
-            smplx_params_gt = torch.cat([body_param_['transl'], body_param_['global_orient'],
-                                            body_param_['betas'], body_param_['body_pose'],
-                                            body_param_['left_hand_pose'],
-                                            body_param_['right_hand_pose'],
-                                            body_param_['leye_pose'],
-                                            body_param_['reye_pose']], dim=-1).detach()  # [T, 3+3+10+63+24+24+3+3]
-
-
-
             self.clip_img_list.append(cur_body)
             self.traj_gt_list.append(global_traj)
             self.rot_0_pivot_list.append(rot_0_pivot)
-            self.transf_matrix_smplx_list.append(transf_matrix_smplx)
-            self.smplx_params_gt_list.append(smplx_params_gt.cpu())
 
         self.clip_img_list = np.asarray(self.clip_img_list)  # [N, T-1, d] / [N, 4, T-1, d]
         self.traj_gt_list = np.asarray(self.traj_gt_list)  # [N, 4, T]

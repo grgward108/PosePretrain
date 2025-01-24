@@ -76,79 +76,95 @@ class MotionLoader(data.Dataset):
                 self.Xstd = None
     
 
-    def normalize(self, v):
+    def normalize_vector(self, v):
         return v / np.linalg.norm(v, axis=-1, keepdims=True)
 
     # Generate SLERP frames
     def generate_slerp_frames(self, marker_start, marker_end, num_frames=10):
         # Normalize the start and end markers
-        start_normalized = self.normalize(marker_start)
-        end_normalized = self.normalize(marker_end)
-        
+        start_normalized = self.normalize_vector(marker_start)
+        end_normalized = self.normalize_vector(marker_end)
+
         # Compute the angle between the vectors (theta)
         dot_product = np.sum(start_normalized * end_normalized, axis=-1)
         dot_product = np.clip(dot_product, -1.0, 1.0)  # Avoid numerical issues
         theta = np.arccos(dot_product)  # Angle in radians
-        
+
+        # Handle cases where theta is 0 (or close to 0)
+        small_angle_mask = np.isclose(theta, 0)
+        if np.any(small_angle_mask):
+            # If theta is 0, all frames are the same as the start frame
+            return np.tile(marker_start[np.newaxis], (num_frames, 1, 1))
+
         # Generate SLERP frames
         t_values = np.linspace(0, 1, num_frames)
         frames = []
-        
         for t in t_values:
-            # Compute SLERP for each marker
             slerp_t = (
                 (np.sin((1 - t) * theta) / np.sin(theta))[:, np.newaxis] * start_normalized +
                 (np.sin(t * theta) / np.sin(theta))[:, np.newaxis] * end_normalized
             )
             frames.append(slerp_t)
-        
+
         frames = np.array(frames)  # Shape: (num_frames, 143, 3)
-        
-        # If magnitudes need to be restored, apply them
+
+        # Restore magnitudes
         start_magnitude = np.linalg.norm(marker_start, axis=-1, keepdims=True)
         end_magnitude = np.linalg.norm(marker_end, axis=-1, keepdims=True)
         magnitudes = np.linspace(start_magnitude, end_magnitude, num_frames)
-
         frames = frames * magnitudes
-        
+
         return frames
 
-    def divide_clip(self, dataset_name='HumanEva', amass_dir=None, stride=None):
-        npz_fnames = sorted(glob.glob(os.path.join(amass_dir, dataset_name, '*/*_poses.npz')))
+    def divide_clip(self, dataset_name='GraspMotion', data_dir=None, stride=None):
+        """
+        Lazy-loading version of divide_clip for GRAB dataset.
+        Only stores metadata for subclips without loading full data.
+        """
+        npz_fnames = sorted(glob.glob(os.path.join(data_dir, dataset_name, '*.npz')))
+        print(f"[DEBUG] Found {len(npz_fnames)} .npz files in dataset {dataset_name}.")
+
         cnt_sub_clip = 0
-
         for npz_fname in npz_fnames:
-            cdata = np.load(npz_fname)
-            fps = int(cdata['mocap_framerate'])
+            with np.load(npz_fname, allow_pickle=True) as cdata:
+                if 'framerate' not in cdata or 'n_frames' not in cdata:
+                    print(f"[WARNING] File {npz_fname} missing required keys. Skipping...")
+                    continue
 
-            if fps == 150:
-                sample_rate = 5
-            elif fps == 120:
-                sample_rate = 4
-            elif fps == 60:
-                sample_rate = 2
-            else:
-                # Skip other FPS
-                cdata.close()
-                continue
-            cdata.close()
+                fps = int(cdata['framerate'])
+                N = cdata['n_frames']
 
-            clip_len = self.clip_seconds * fps + sample_rate + 1
-            stride_ = stride or clip_len
-            # We only store metadata here, not loading now
-            with np.load(npz_fname) as cdata:
-                N = len(cdata['poses'])
-            if N >= clip_len:
-                for start_idx in range(0, N - clip_len + 1, stride_):
-                    self.data_metadata_list.append({
-                        'npz_fname': npz_fname,
-                        'start_idx': start_idx,
-                        'sample_rate': sample_rate,
-                        'fps': fps
-                    })
-                    cnt_sub_clip += 1
+                # Determine sample rate based on fps
+                if fps == 150:
+                    sample_rate = 5
+                elif fps == 120:
+                    sample_rate = 4
+                elif fps == 60:
+                    sample_rate = 2
+                else:
+                    print(f"[WARNING] Unsupported FPS ({fps}) in file: {npz_fname}. Skipping...")
+                    continue
 
-        print(f'Generated {cnt_sub_clip} subclips from dataset {dataset_name}.')
+                clip_len = self.clip_seconds * fps + sample_rate + 1
+                stride_ = stride or clip_len
+
+                # Only store metadata for valid subclips
+                if N >= clip_len:
+                    for start_idx in range(0, N - clip_len + 1, stride_):
+                        self.data_metadata_list.append({
+                            'npz_fname': npz_fname,
+                            'start_idx': start_idx,
+                            'sample_rate': sample_rate,
+                            'fps': fps,
+                            'clip_len': clip_len
+                        })
+                        cnt_sub_clip += 1
+                else:
+                    print(f"[WARNING] Skipping file {npz_fname}: not enough frames (N={N}, required={clip_len}).")
+
+        print(f"[DEBUG] Generated {cnt_sub_clip} subclips from dataset {dataset_name}.")
+
+
 
     def read_data(self, amass_datasets, amass_dir, stride=None):
         for dataset_name in tqdm(amass_datasets):

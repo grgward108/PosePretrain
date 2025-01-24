@@ -116,3 +116,4 @@ class Traj_MLP_CVAE(nn.Module):  # T*4 => T*8 => ResBlock -> z => ResBlock
             self.load_state_dict(model_cp['model_dict'])
         else:
             print("No pretrained model provided. Training from scratch.")
+

@@ -9,7 +9,7 @@ import numpy as np
 import open3d as o3d
 import smplx
 import torch
-from WholeGraspPose.models.objectmodel import ObjectModel
+# from WholeGraspPose.models.objectmodel import ObjectModel
 
 from utils.Pivots import Pivots
 from utils.Quaternions import Quaternions

@@ -21,7 +21,7 @@ print("[INFO] Initializing MotionLoader...")
 dataset = MotionLoader(
     clip_seconds=clip_seconds,
     clip_fps=clip_fps,
-    normalize=True,
+    normalize=False,
     split='train',
     markers_type=markers_type,
     mode=mode,
@@ -34,7 +34,7 @@ dataset.read_data(amass_datasets, amass_dir)
 
 # Create body representations
 print("[INFO] Creating body representations...")
-dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
+dataset.create_body_repr(smplx_model_path=smplx_model_path)
 
 masked_clip, mask, original_clip = dataset[7]  # Uses the __getitem__ method
 
@@ -48,7 +48,7 @@ if isinstance(original_clip, torch.Tensor):
 
 
 # Save both to a compressed file
-output_file = os.path.join(output_folder, f"{amass_datasets[0]}_seventh_batch_Test_marker_with_masking.npz")
+output_file = os.path.join(output_folder, f"{amass_datasets[0]}_seventh_batch_Test_marker_with_global_z0.npz")
 np.savez_compressed(
     output_file,
     masked_clip=masked_clip,

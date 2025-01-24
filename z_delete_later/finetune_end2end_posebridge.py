@@ -476,6 +476,9 @@ def main(exp_name):
     # Freeze LiftUpTransformer parameters
     for param in liftup_transformer.parameters():
         param.requires_grad = False
+        
+    for param in temporal_transformer.parameters():
+        param.requires_grad = False
 
     # Combine Models
     model = EndToEndModel(temporal_transformer, liftup_transformer).to(DEVICE)

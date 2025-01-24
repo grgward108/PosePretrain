@@ -36,7 +36,6 @@ class PreprocessedMotionLoader(Dataset):
         """
         file_path = self.file_list[idx]
         data = np.load(file_path)
-        print(data.keys)
 
         clip_img_joints = torch.tensor(data['clip_img_joints'], dtype=torch.float32)
         clip_img_markers = torch.tensor(data['clip_img_markers'], dtype=torch.float32)
@@ -51,11 +50,27 @@ class PreprocessedMotionLoader(Dataset):
         marker_end = torch.tensor(data['marker_end'], dtype=torch.float32)
         joint_start = torch.tensor(data['joint_start'], dtype=torch.float32)
         joint_end = torch.tensor(data['joint_end'], dtype=torch.float32)
-        marker_start_global = torch.tensor(data['marker_start_global'], dtype=torch.float32) # Added global start marker
-        marker_end_global  = torch.tensor(data['marker_end_global'], dtype=torch.float32) # Added global start marker
+        joint_start_global = torch.tensor(data['joint_start_global'], dtype=torch.float32)  # Added global start marker
+        joint_end_global = torch.tensor(data['joint_end_global'], dtype=torch.float32)  # Added global start marker
+        # marker_start_global = torch.tensor(data['marker_start_global'], dtype=torch.float32)  # Added global start marker
+        # marker_end_global = torch.tensor(data['marker_end_global'], dtype=torch.float32)  # Added global start marker
 
         return (
+            clip_img_joints,
+            clip_img_markers,
+            slerp_img,
             traj,
-            marker_start_global,  # Added global start marker
-            marker_end_global     # Added global end marker
+            joint_start_global,
+            joint_end_global,
+            # marker_start_global,
+            # marker_end_global,
+            smplx_beta,
+            gender,
+            rot_0_pivot,
+            transf_matrix_smplx,
+            smplx_params_gt,
+            marker_start,
+            marker_end,
+            joint_start,
+            joint_end
         )

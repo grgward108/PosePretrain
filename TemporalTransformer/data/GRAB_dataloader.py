@@ -48,82 +48,6 @@ def get_body_model(type, body_model_path, gender, batch_size,device='cpu',v_temp
         return body_model.cuda()
     else:
         return body_model
-    
-def save_preprocessed_data(dataset, save_dir):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    for idx, data in enumerate(dataset):
-        # Extract dataset name for sub-directory creation
-        dataset_name = dataset.data_dict_list[idx].get('dataset_name', 'unknown')
-        dataset_dir = os.path.join(save_dir, dataset_name)
-        
-        if not os.path.exists(dataset_dir):
-            os.makedirs(dataset_dir)
-
-        # Process and save data (updated to include global markers)
-        (
-            clip_img_joints,
-            clip_img_markers,
-            slerp_img,
-            traj,
-            smplx_beta,
-            gender,
-            rot_0_pivot,
-            transf_matrix_smplx,
-            smplx_params_gt,
-            marker_start,
-            marker_end,
-            joint_start,
-            joint_end,
-            joint_start_global,  # Added global start marker
-            joint_end_global,
-            marker_start_global,  # Added global end marker
-            marker_end_global
-        ) = data
-        
-        # Convert tensors to numpy arrays
-        def to_numpy(x):
-            return x.cpu().numpy() if isinstance(x, torch.Tensor) else x
-
-        clip_img_joints = to_numpy(clip_img_joints)
-        clip_img_markers = to_numpy(clip_img_markers)
-        slerp_img = to_numpy(slerp_img)
-        traj = to_numpy(traj)
-        smplx_beta = to_numpy(smplx_beta)
-        transf_matrix_smplx = to_numpy(transf_matrix_smplx)
-        smplx_params_gt = to_numpy(smplx_params_gt)
-        marker_start = to_numpy(marker_start)
-        marker_end = to_numpy(marker_end)
-        joint_start = to_numpy(joint_start)
-        joint_end = to_numpy(joint_end)
-        joint_start_global = to_numpy(joint_start_global)  # Convert to numpy
-        joint_end_global = to_numpy(joint_end_global)      # Convert to numpy
-        marker_start_global = to_numpy(marker_start_global)  # Convert to numpy
-        marker_end_global = to_numpy(marker_end_global)      # Convert to numpy
-
-        # Save in sub-directory for dataset
-        np.savez_compressed(
-            os.path.join(dataset_dir, f"sample_{idx}.npz"),
-            clip_img_joints=clip_img_joints,
-            clip_img_markers=clip_img_markers,
-            slerp_img=slerp_img,
-            traj=traj,
-            smplx_beta=smplx_beta,
-            gender=gender,
-            rot_0_pivot=rot_0_pivot,
-            transf_matrix_smplx=transf_matrix_smplx,
-            smplx_params_gt=smplx_params_gt,
-            marker_start=marker_start,
-            marker_end=marker_end,
-            joint_start=joint_start,
-            joint_end=joint_end,
-            joint_start_global=joint_start_global,  # Save global start marker
-            joint_end_global=joint_end_global,
-            marker_start_global=marker_start_global,  # Save global end marker
-            marker_end_global=marker_end_global
-        )
-
 
 class GRAB_DataLoader(data.Dataset):
     def __init__(self, clip_seconds=8, clip_fps=30, normalize=False, split='train', markers_type=None, mode=None, is_debug=False, log_dir=''):
@@ -168,6 +92,45 @@ class GRAB_DataLoader(data.Dataset):
                         continue
                 else:
                     self.markers_ids += list(marker['indices'].values())
+
+    def generate_slerp_frames(self, marker_start, marker_end, num_frames=60):
+        """
+        Generate SLERP (Spherical Linear Interpolation) frames between two markers.
+        """
+        def normalize(v):
+            return v / np.linalg.norm(v, axis=-1, keepdims=True)
+        
+        # Normalize the start and end markers
+        start_normalized = normalize(marker_start)
+        end_normalized = normalize(marker_end)
+        
+        # Compute the angle between the vectors (theta)
+        dot_product = np.sum(start_normalized * end_normalized, axis=-1)
+        dot_product = np.clip(dot_product, -1.0, 1.0)  # Avoid numerical issues
+        theta = np.arccos(dot_product)  # Angle in radians
+        
+        # Generate SLERP frames
+        t_values = np.linspace(0, 1, num_frames)
+        frames = []
+        
+        for t in t_values:
+            # Compute SLERP for each marker
+            slerp_t = (
+                (np.sin((1 - t) * theta) / np.sin(theta))[:, np.newaxis] * start_normalized +
+                (np.sin(t * theta) / np.sin(theta))[:, np.newaxis] * end_normalized
+            )
+            frames.append(slerp_t)
+        
+        frames = np.array(frames)  # Shape: (num_frames, num_markers, 3)
+        
+        # Restore magnitudes if needed
+        start_magnitude = np.linalg.norm(marker_start, axis=-1, keepdims=True)
+        end_magnitude = np.linalg.norm(marker_end, axis=-1, keepdims=True)
+        magnitudes = np.linspace(start_magnitude, end_magnitude, num_frames)
+        frames = frames * magnitudes
+        
+        return frames
+
 
     def divide_clip(self, dataset_name='GraspMotion', data_dir=None):
         npz_fnames = sorted(glob.glob(os.path.join(data_dir, dataset_name) + '/*.npz'))  # name list of all npz sequence files in current dataset
@@ -232,7 +195,6 @@ class GRAB_DataLoader(data.Dataset):
             data_dict['gender'] = seq_gender
             data_dict['vtemp'] = seq_vtemp
             data_dict['framerate'] = seq_fps
-            data_dict['dataset_name'] = dataset_name
 
             assert data_dict['body']['transl'].shape[0] == 62
 
@@ -245,32 +207,13 @@ class GRAB_DataLoader(data.Dataset):
             self.divide_clip(dataset_name, amass_dir)
         self.n_samples = len(self.data_dict_list)
         print('[INFO] get {} sub clips in total.'.format(self.n_samples))
-    
-    
-    def generate_linear_frames(self, marker_start, marker_end, num_frames=61):
-        """
-        Generate interpolated frames using linear interpolation.
-        
-        Args:
-            marker_start (numpy.ndarray): Starting marker positions (N, 3).
-            marker_end (numpy.ndarray): Ending marker positions (N, 3).
-            num_frames (int): Number of frames to generate.
-
-        Returns:
-            numpy.ndarray: Interpolated frames (T, N, 3).
-        """
-        t = np.linspace(0, 1, num_frames)[:, np.newaxis, np.newaxis]  # Shape: (T, 1, 1)
-        interpolated_frames = marker_start[np.newaxis, :, :] * (1 - t) + marker_end[np.newaxis, :, :] * t
-        return interpolated_frames
 
 
     def create_body_repr(self, with_hand=False, global_rot_norm=True, 
                          smplx_model_path=None):
         print('[INFO] create motion clip imgs by {}...'.format(self.mode))
-        
-        self.clip_img_list = [] #just an empty array for consistency
-        self.clip_img_joints_list = []
-        self.clip_img_markers_list = []
+
+        self.clip_img_list = []
         self.beta_list = []
         self.rot_0_pivot_list = []
         self.transf_matrix_smplx_list = []
@@ -280,10 +223,6 @@ class GRAB_DataLoader(data.Dataset):
         self.joint_start_list = []
         self.joint_end_list = []
         self.traj_gt_list = []
-        self.joint_start_list_global = []
-        self.joint_end_list_global = []
-        self.marker_start_list_global = []
-        self.marker_end_list_global = []
 
         self.male_body_model = get_body_model('smplx', smplx_model_path, 'male', self.clip_len, 'cpu')
         self.female_body_model = get_body_model('smplx', smplx_model_path, 'female', self.clip_len, 'cpu')
@@ -325,45 +264,37 @@ class GRAB_DataLoader(data.Dataset):
                 transf_rotmat = torch.stack([x_axis, y_axis, z_axis], dim=1)  # [3, 3]
                 joints = torch.matmul(joints - joints_frame0[0], transf_rotmat)  # [T(/bs), 25, 3]
                 transl_1 = - joints_frame0[0]
-                markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3] 
-                markers_floor_aligned = markers.clone()
-                markers_floor_aligned[:, :, 2] -= markers_floor_aligned[:, :, 2].min()     
-                
-                joints_floor_aligned = joints.clone()
-                joints_floor_aligned[:, :, 2] -= joints_floor_aligned[:, :, 2].min()
+                markers = torch.matmul(markers - joints_frame0[0], transf_rotmat)   # [T(/bs), n_marker, 3]
 
-                # Save the global context for start and end joints (floor-aligned)
-                self.joint_start_list_global.append(joints_floor_aligned[0].detach().cpu().numpy())  # First joint
-                self.joint_end_list_global.append(joints_floor_aligned[-1].detach().cpu().numpy())  # Last joint
-                self.marker_start_list_global.append(markers_floor_aligned[0].detach().cpu().numpy())  # First marker
-                self.marker_end_list_global.append(markers_floor_aligned[-1].detach().cpu().numpy())  # Last marker
-                
-                 
-            # Save trajectory
+            self.marker_start_list.append(markers[0].detach().cpu().numpy())
+            self.marker_end_list.append(markers[-2].detach().cpu().numpy())
+            self.joint_start_list.append(joints[0].detach().cpu().numpy())
+            self.joint_end_list.append(joints[-2].detach().cpu().numpy())                
+
+
+            # save trajectory
             x_axes = joints[:, 2, :] - joints[:, 1, :]  # [T, 3]
             x_axes[:, -1] = 0
             x_axes = x_axes / torch.norm(x_axes, dim=-1).unsqueeze(1)
             z_axes = torch.zeros_like(x_axes).to(device)
             z_axes[:, -1] = 1
-            # Get "forward" direction of the body
+            # get "forward" direction of the body
             y_axes = torch.cross(z_axes, x_axes, dim=-1)
             y_axes = y_axes / torch.norm(y_axes, dim=-1).unsqueeze(1)
-
+            
             global_x = joints[:, 0, 0]
             global_y = joints[:, 0, 1]
-            # The first and second elements of y_axes (sin and cos of theta)
+            # the first and second elements of y_axes (sin and cos of theta)
             rot_forward_x = y_axes[:, 0]
             rot_forward_y = y_axes[:, 1]
 
-            # Use only first 61 timestamps for global traj (to stay the same dimension as using velocity)
+            # use only first 61 timestamps for global traj (to stay same dimention as using velocity)
             global_x = global_x.unsqueeze(0).detach().cpu().numpy()
             global_y = global_y.unsqueeze(0).detach().cpu().numpy()
             rot_forward_x = rot_forward_x.unsqueeze(0).detach().cpu().numpy()
             rot_forward_y = rot_forward_y.unsqueeze(0).detach().cpu().numpy()
-            
-            global_pelvis = np.concatenate([global_x, global_y], axis=0)  # [2, 61]
 
-            global_traj = np.concatenate([global_x, global_y, rot_forward_x, rot_forward_y], axis=0)  # [4, 61]
+            global_traj = np.concatenate([global_x, global_y, rot_forward_x, rot_forward_y], axis=0) # [4, 61]
             # self.traj_gt_list.append(global_traj)
 
             ######## obtain binary contact labels
@@ -424,46 +355,42 @@ class GRAB_DataLoader(data.Dataset):
             body_joints = joints[:, 0:25]    # [T, 25, 3]  root(1) + body(21) + jaw/leye/reye(3)
             hand_joints = joints[:, 25:55]   # [T, 30, 3]
 
-            if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan', 'local_markers_3dv', 'local_markers_3dv_4chan']:
-                # Always get both joints and markers
+            if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan']:
                 if with_hand:
-                    cur_body_joints = torch.cat([body_joints, hand_joints], axis=1)  # [T, 55, 3] (25 body + 30 hand)
+                    cur_body = torch.cat([body_joints, hand_joints], axis=1)  # [T, 25, 3]
                 else:
-                    cur_body_joints = body_joints  # [T, 25, 3]
-
-                cur_body_markers = markers  # [T, n_markers, 3]
+                    cur_body = body_joints
+            if self.mode in ['local_markers_3dv', 'local_markers_3dv_4chan']:
+                cur_body = torch.cat([body_joints[:, 0:1], markers], dim=1)  # first row: pelvis joint [T, 67+1, 3]
 
             ############################# local joints from Holten ###############################
             if self.mode in ['local_joints_3dv', 'local_joints_3dv_4chan',
                                 'local_markers_3dv', 'local_markers_3dv_4chan']:
-                # Process joints first (as reference)
-                cur_body_joints = cur_body_joints.detach().cpu().numpy()  # numpy, [T, 25 or 55, 3], in (x,y,z)
-                cur_body_joints[:, :, [1, 2]] = cur_body_joints[:, :, [2, 1]] # swap y/z axis  --> now (x,z,y)
+                cur_body = cur_body.detach().cpu().numpy()  # numpy, [T, 25 or 68, 3], in (x,y,z)
+                cur_body[:, :, [1, 2]] = cur_body[:, :, [2, 1]] # swap y/z axis  --> in (x,z,y)
 
-                """ Put on Floor for joints """
-                cur_body_joints[:, :, 1] = cur_body_joints[:, :, 1] - cur_body_joints[:, :, 1].min()
-                
-                pelvis_global = cur_body_joints[:, 0:1, :].copy()  # [T-1, 1, 3]
-                pelvis_global[:, :, 2] = 0  # Set the z-dimension (third dimension) to 0
-
-                z_transl = cur_body_joints[:, :, 1].min()
+                """ Put on Floor """
+                cur_body[:, :, 1] = cur_body[:, :, 1] - cur_body[:, :, 1].min()
+                z_transl = cur_body[:, :, 1].min()
 
                 """ Add Reference Joint """
-                reference = cur_body_joints[:, 0] * np.array([1, 0, 1])  # [T, 3], (x,y,0)
-                cur_body_joints = np.concatenate([reference[:, np.newaxis], cur_body_joints], axis=1)  # [T, 1+(25 or 55), 3]
+                reference = cur_body[:, 0] * np.array([1, 0, 1])  # [T, 3], (x,y,0)
+                cur_body = np.concatenate([reference[:, np.newaxis], cur_body], axis=1)  # [T, 1+25 or 1+68, 3]
 
-                """ Get Root Velocity in floor plane (from joints) """
-                velocity = (cur_body_joints[1:, 0:1] - cur_body_joints[0:-1, 0:1]).copy()  # [T-1, 1, 3] ([:, 1]==0)
+                """ Get Root Velocity in floor plane """
+                velocity = (cur_body[1:, 0:1] - cur_body[0:-1, 0:1]).copy()  # [T-1, 3] ([:, 1]==0)
 
-                """ To local coordinates (for joints) """
-                cur_body_joints[:, :, 0] = cur_body_joints[:, :, 0] - cur_body_joints[:, 0:1, 0]  # [T, 1+(25 or 55), 3]
-                cur_body_joints[:, :, 2] = cur_body_joints[:, :, 2] - cur_body_joints[:, 0:1, 2]
+                """ To local coordinates """
+                cur_body[:, :, 0] = cur_body[:, :, 0] - cur_body[:, 0:1, 0]  # [T, 1+25 or 1+68, 3]
+                cur_body[:, :, 2] = cur_body[:, :, 2] - cur_body[:, 0:1, 2]
 
-                """ Get Forward Direction using original joints before we transformed them """
+                """ Get Forward Direction """
+                # using joints
                 joints_np = joints.detach().cpu().numpy()
                 joints_np[:, :, [1, 2]] = joints_np[:, :, [2, 1]] # swap y/z axis
                 across = joints_np[:, 2] - joints_np[:, 1]
                 across = across / np.sqrt((across ** 2).sum(axis=-1))[..., np.newaxis]
+                # ipdb.set_trace()
 
                 direction_filterwidth = 20
                 forward = np.cross(across, np.array([[0, 1, 0]]))
@@ -473,7 +400,7 @@ class GRAB_DataLoader(data.Dataset):
                 """ Remove Y Rotation """
                 target = np.array([[0, 0, 1]]).repeat(len(forward), axis=0)
                 rotation = Quaternions.between(forward, target)[:, np.newaxis]
-                cur_body_joints = rotation * cur_body_joints  # [T, 1+(25 or 55), 3]
+                cur_body = rotation * cur_body  # [T, 1+25 or 1+68, 3]
 
                 """ Get Root Rotation """
                 velocity = rotation[1:] * velocity  # [T-1, 1, 3]
@@ -481,46 +408,15 @@ class GRAB_DataLoader(data.Dataset):
 
                 rot_0_pivot = Pivots.from_quaternions(rotation[0]).ps   # [T-1, 1]
 
-                cur_body_joints[:, :, [1, 2]] = cur_body_joints[:, :, [2, 1]]
-                # Now cur_body_joints is [T, 1+(25 or 55), 3], we need to drop the last frame and first ref joint
-                cur_body_joints = cur_body_joints[0:-1, 1:, :]  # [T-1, 25 or 55, 3]
-                cur_body_joints = np.concatenate([pelvis_global[:-1], cur_body_joints], axis=1)  # [T-1, 26 or 56, 3]
-                print("cur_body_joints shape: ", cur_body_joints.shape)
 
-
-            ############################# local markers from Holten ###############################
-                # Apply the same transformation to markers
-                cur_body_markers = cur_body_markers.detach().cpu().numpy()  # numpy, [T, n_markers, 3]
-                cur_body_markers[:, :, [1, 2]] = cur_body_markers[:, :, [2, 1]]  # swap y/z axis  --> now (x,z,y)
-
-                # Put on Floor for markers
-                cur_body_markers[:, :, 1] = cur_body_markers[:, :, 1] - cur_body_markers[:, :, 1].min()
-
-                # Shift to local coordinates (for markers)
-                cur_body_markers[:, :, 0] -= joints_np[:, 0:1, 0]
-                cur_body_markers[:, :, 2] -= joints_np[:, 0:1, 2]
-
-                # Apply the same quaternion rotation for forward direction to markers
-                cur_body_markers = rotation * cur_body_markers
-
-                # Swap back y/z after rotation (for consistency)
-                cur_body_markers[:, :, [1, 2]] = cur_body_markers[:, :, [2, 1]]
-
-                # Truncate markers to match joint frames
-                cur_body_markers = cur_body_markers[0:-1, :, :]  # [T-1, n_markers, 3]
-                cur_body_markers = np.concatenate([pelvis_global[:-1], cur_body_markers], axis=1)  # [T-1, 25 + 1 or 55 + 1, 3]
-
-                
-                self.marker_start_list.append(cur_body_markers[0])
-                self.marker_end_list.append(cur_body_markers[-1])
-                self.joint_start_list.append(cur_body_joints[0])
-                self.joint_end_list.append(cur_body_joints[-1])
+                cur_body[:, :, [1, 2]] = cur_body[:, :, [2, 1]]
+                cur_body = cur_body[0:-1, 1:, :]  # [T-1, 25 or 68, 3]
+                cur_body = cur_body.reshape(len(cur_body), -1)  # [T-1, 75 or 204]
 
                 if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
                     # global vel (3) + local pose (25*3) + contact label (4)
                     global_vel = np.concatenate([velocity[:, :, 0], velocity[:, :, 2], rvelocity], axis=-1)
-                    self.clip_img_joints_list.append(cur_body_joints)
-                    self.clip_img_markers_list.append(cur_body_markers)
+                    cur_body = np.concatenate([global_vel, cur_body, contact_lbls[0:-1]], axis=-1)  # [T-1, d=3+75(204)+4]
 
                 elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
                     channel_local = np.concatenate([cur_body, contact_lbls[0:-1]], axis=-1)[np.newaxis, :, :]  # [1, T-1, d=75(204)+4]
@@ -556,6 +452,7 @@ class GRAB_DataLoader(data.Dataset):
                                             body_param_['reye_pose']], dim=-1).detach()  # [T, 3+3+10+63+24+24+3+3]
 
 
+            self.clip_img_list.append(cur_body)
             self.traj_gt_list.append(global_traj)
             self.rot_0_pivot_list.append(rot_0_pivot)
             self.transf_matrix_smplx_list.append(transf_matrix_smplx)
@@ -667,34 +564,19 @@ class GRAB_DataLoader(data.Dataset):
 
 
     def __getitem__(self, index):
-        clip_img_joints = None
-        clip_img_markers = None
+        if self.mode in ['local_joints_3dv', 'local_markers_3dv']:
+            clip_img = self.clip_img_list[index]  # [T, d] d dims of body representation
+            clip_img = torch.from_numpy(clip_img).float().permute(1, 0).unsqueeze(0)  # [1, d, T]
+        elif self.mode in ['local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
+            clip_img = self.clip_img_list[index]  # [4, T, d]
+            clip_img = torch.from_numpy(clip_img).float().permute(0, 2, 1)  # [4, d, T]
 
-        if self.mode in ['local_joints_3dv', 'local_markers_3dv', 'local_joints_3dv_4chan', 'local_markers_3dv_4chan']:
-            clip_img_joints = self.clip_img_joints_list[index]
-            if isinstance(clip_img_joints, np.ndarray):
-                clip_img_joints = torch.from_numpy(clip_img_joints).float().permute(2, 1, 0)
-            # Move to CPU and detach if it's a tensor
-            if isinstance(clip_img_joints, torch.Tensor):
-                clip_img_joints = clip_img_joints.cpu().detach()
-
-            clip_img_markers = self.clip_img_markers_list[index]
-            if isinstance(clip_img_markers, np.ndarray):
-                clip_img_markers = torch.from_numpy(clip_img_markers).float().permute(2, 1, 0)
-            # Move to CPU and detach if it's a tensor
-            if isinstance(clip_img_markers, torch.Tensor):
-                clip_img_markers = clip_img_markers.cpu().detach()
-
-        smplx_beta = torch.from_numpy(self.data_dict_list[index]['betas'][0:10]).float().cpu().detach().numpy()
+        smplx_beta = torch.from_numpy(self.data_dict_list[index]['betas'][0:10]).float()  # [10]
         gender = self.data_dict_list[index]['gender']
-        rot_0_pivot = self.rot_0_pivot_list[index]  # Already numpy
+        rot_0_pivot = self.rot_0_pivot_list[index]
         transf_matrix_smplx = self.transf_matrix_smplx_list[index]
-        if isinstance(transf_matrix_smplx, torch.Tensor):
-            transf_matrix_smplx = transf_matrix_smplx.cpu().detach().numpy()
         smplx_params_gt = self.smplx_params_gt_list[index]
-        if isinstance(smplx_params_gt, torch.Tensor):
-            smplx_params_gt = smplx_params_gt.cpu().detach().numpy()
-        traj = self.traj_gt_list[index]  # Assuming already numpy
+        traj = self.traj_gt_list[index]
 
         if gender == 'female':
             gender = 0
@@ -703,43 +585,15 @@ class GRAB_DataLoader(data.Dataset):
 
         marker_start = self.marker_start_list[index]
         marker_end = self.marker_end_list[index]
+
         joint_start = self.joint_start_list[index]
         joint_end = self.joint_end_list[index]
 
-        first_frame = joint_start[0:26, :] #here because we added the pelvis global as first joints we take 26 joints now
-        last_frame = joint_end[0:26, :]
-        slerp_img = self.generate_linear_frames(first_frame, last_frame, 61)
-        slerp_img = torch.from_numpy(slerp_img).float().cpu().detach().numpy()
-
-        # Convert tensors to numpy arrays only after CPU and detach
-        clip_img_joints_np = clip_img_joints.numpy() if isinstance(clip_img_joints, torch.Tensor) else clip_img_joints
-        clip_img_markers_np = clip_img_markers.numpy() if isinstance(clip_img_markers, torch.Tensor) else clip_img_markers
-        
-        joint_start_global = self.joint_start_list_global[index]
-        joint_end_global = self.joint_end_list_global[index]
-        marker_start_global = self.marker_start_list_global[index]
-        marker_end_global = self.marker_end_list_global[index]
-
-        return [
-            clip_img_joints_np,
-            clip_img_markers_np,
-            slerp_img,
-            traj,
-            smplx_beta,
-            gender,
-            rot_0_pivot,
-            transf_matrix_smplx,
-            smplx_params_gt,
-            marker_start,
-            marker_end,
-            joint_start,
-            joint_end,
-            joint_start_global,
-            joint_end_global,
-            marker_start_global,
-            marker_end_global
-        ]
-
+        slerp_img = self.generate_slerp_frames(joint_start, joint_end, num_frames=61)  # [61, num_markers, 3]
+        slerp_img = torch.from_numpy(slerp_img).float()
+       
+        return [clip_img.numpy(), slerp_img.numpy(), traj, smplx_beta.numpy(), gender, rot_0_pivot, transf_matrix_smplx.numpy(), smplx_params_gt.numpy(),
+                marker_start, marker_end, joint_start, joint_end]
 
         # return [clip_img]
 
@@ -759,7 +613,10 @@ if __name__ == "__main__":
     dataset.read_data(grab_datasets, grab_dir)
 
     """143 markers / 55 joints if with_hand else 72 markers / 25 joints"""
-    dataset.create_body_repr(with_hand=False, smplx_model_path=smplx_model_path)
+    dataset.create_body_repr(with_hand=True, smplx_model_path=smplx_model_path)
 
     print('length of dataset:', len(dataset))
     print(dataset[0][0].shape)
+
+
+
