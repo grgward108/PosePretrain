@@ -23,3 +23,8 @@ pretrained_models/
 pretrained_model/
 visualize/
 evaluation_01/
+PoseBridge/
+MotionFill/
+grab_datadump/
+code_dump_might_need/
+z_delete_later/
