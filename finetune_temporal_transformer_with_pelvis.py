@@ -24,7 +24,7 @@ MODE = 'local_joints_3dv'
 SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 26 # change to 26 because we add one more pelvis global joint
-TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/epoch_15_checkpoint_abb_no_acc_no_footskat.pth'
+TEMPORAL_CHECKPOINT_PATH = 'pretrained_models/generalized_spatio_temporal_transformer.pth'
 
 PELVIS_LOSS_WEIGHT = 4.0
 LEG_RECONSTRUCTION_WEIGHT = 4.0

@@ -24,7 +24,7 @@ SMPLX_MODEL_PATH = 'body_utils/body_models'
 STRIDE = 30
 NUM_JOINTS = 22
 NUM_MARKERS = 143
-LIFTUP_CHECKPOINT_PATH = 'pretrained_models/best_model_epoch_30_liftup.pth'
+LIFTUP_CHECKPOINT_PATH = 'pretrained_models/generalized_liftup_transformer.pth'
 
 grab_dir = '../../../data/edwarde/dataset/grab/GraspMotion'
 train_datasets = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']
