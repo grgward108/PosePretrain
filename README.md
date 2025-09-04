@@ -1,4 +1,5 @@
 # Implementation of A Unified Transformer-Based Framework with Pretraining For Whole Body Grasping Motion Generation
+Accepted at the ICIP 2025
 
 ## Environment
 
